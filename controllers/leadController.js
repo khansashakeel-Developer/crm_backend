@@ -3475,7 +3475,10 @@ function buildLeadHeaderMap(worksheet) {
     const rawHeaders = new Set();
 
     headerRow.eachCell((cell, colNumber) => {
-        const text = String(cell.value || "").trim().toLowerCase();
+        // ✅ Header cell mein kabhi kabhi "[...]" mein explanatory note hoti hai —
+        // "platform [have this as well...]" → sirf "platform" nikalo
+        const fullText = String(cell.value || "").trim().toLowerCase();
+        const text = fullText.split("[")[0].trim();
         if (!text) return;
         rawHeaders.add(text);
 
@@ -3496,7 +3499,6 @@ function buildLeadHeaderMap(worksheet) {
         else if (text === "job_title") map.jobTitle = colNumber;
         else if (text === "phone_number") map.phoneNumber = colNumber;
         else if (text === "city") map.city = colNumber;
-        // Generic manual-list headers
         else if (text === "first name") map.firstName = colNumber;
         else if (text === "last name") map.lastName = colNumber;
         else if (text === "phone") map.phone = colNumber;
@@ -3505,13 +3507,10 @@ function buildLeadHeaderMap(worksheet) {
         else if (text === "profession") map.profession = colNumber;
         else if (text === "source") map.source = colNumber;
         else if (text === "quality") map.quality = colNumber;
-        // Shared
         else if (text === "email") map.email = colNumber;
     });
 
-    // ✅ Auto-detect: Facebook export vs generic list
     map.isFacebookFormat = rawHeaders.has("full_name") && (rawHeaders.has("ad_id") || rawHeaders.has("campaign_id"));
-
     return map;
 }
 
@@ -3579,6 +3578,40 @@ exports.previewBulkLeads = async (req, res) => {
                 const rawExternalId = cellText(row, headerMap.externalLeadId);
                 const externalLeadId = rawExternalId ? rawExternalId.replace(/^l:/i, "").trim() : null;
 
+                const platformMap = {
+                    fb: "Facebook",
+                    facebook: "Facebook",
+                    ig: "Instagram",
+                    instagram: "Instagram",
+                };
+
+                let rawPlatform = String(cellText(row, headerMap.platform) || "").trim().toLowerCase();
+
+                // ✅ Fallback: agar "platform" column export me hai hi nahi, to ad/campaign/form name se guess karo
+                if (!rawPlatform) {
+                    const combinedText = [
+                        cellText(row, headerMap.adName),
+                        cellText(row, headerMap.campaignName),
+                        cellText(row, headerMap.formName),
+                    ].filter(Boolean).join(" ").toLowerCase();
+
+                    if (combinedText.includes("instagram") || combinedText.includes(" ig ") || combinedText.includes("ig_")) {
+                        rawPlatform = "instagram";
+                    } else if (combinedText.includes("facebook") || combinedText.includes("fb_")) {
+                        rawPlatform = "fb";
+                    }
+                }
+
+                let source;
+                if (rawPlatform === "ig" || rawPlatform === "instagram") {
+                    source = "instagram";
+                } else if (rawPlatform === "fb" || rawPlatform === "facebook") {
+                    source = "facebook";
+                } else {
+                    console.warn(`[BulkLeadImport] Could not detect platform for row, defaulting to facebook. adName/campaignName/formName checked.`);
+                    source = "facebook";
+                }
+
                 parsedRows.push({
                     firstName,
                     lastName,
@@ -3588,10 +3621,10 @@ exports.previewBulkLeads = async (req, res) => {
                     nationality: undefined,
                     profession: cellText(row, headerMap.jobTitle) || undefined,
                     city: cellText(row, headerMap.city) || undefined,
-                    source: "facebook",
+                    source,
                     quality: "warm",
                     adSource: {
-                        platform: cellText(row, headerMap.platform) || "fb",
+                        platform: platformMap[rawPlatform] || rawPlatform || "Facebook",
                         externalLeadId,
                         adId: cellText(row, headerMap.adId),
                         adName: cellText(row, headerMap.adName),
@@ -3816,7 +3849,7 @@ exports.confirmBulkLeads = async (req, res) => {
                 opportunity_value,
                 user_id: user._id,
                 created_by: req.user._id,
-                assigned_to: assignedManager,  
+                assigned_to: assignedManager,
                 ...(adSource ? { adSource } : {}),
             });
             if (isNewUser) {
