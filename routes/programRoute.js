@@ -46,6 +46,7 @@ const {
   adminAddStudentToBatch,
   adminRemoveStudentFromBatch,
   adminSwitchStudentBatch,
+  uploadMaterial
 } = require("../controllers/programController.js");
 
 // ── Multer Memory Storage ──
@@ -179,5 +180,7 @@ router.delete("/lessons/:id", protect, authorize("admin", "super_admin"), adminD
 router.get("/:id", protect, authorize("admin", "super_admin", "sales_manager", "sales_rep", "finance_manager"), adminGetProgramById);
 router.put("/:id", protect, authorize("admin", "super_admin", "finance_manager"), adminUpdateProgram);
 router.delete("/:id", protect, authorize("admin", "super_admin"), adminDeleteProgram);
+
+router.post("/upload-material", protect, authorize("admin", "super_admin"), upload.single("file"), uploadMaterial);
 
 module.exports = router;

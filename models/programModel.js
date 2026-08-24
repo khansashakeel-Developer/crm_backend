@@ -21,8 +21,9 @@ const programSchema = new mongoose.Schema(
         level: {
             type: String,
             enum: ["level 1", "level 2", "level 3", "level 4", "level 5", "level 6"],
-            default: "level 1",
-            required: true,
+            required: function () {
+                return this.category !== "business_in_a_box";
+            },
         },
         thumbnail: {
             type: String, // S3 URL
@@ -40,7 +41,7 @@ const programSchema = new mongoose.Schema(
         },
         category: {
             type: String,
-            enum: ["nlp", "icf", "hypnotherapy", "trainer"],
+            enum: ["nlp", "icf", "hypnotherapy", "trainer", "business_in_a_box"],
             default: "nlp",
         },
         status: {
@@ -73,6 +74,19 @@ const programSchema = new mongoose.Schema(
             type: Number,
             default: 0,
         },
+        materials: [
+            {
+                title: { type: String, required: true },       
+                type: {
+                    type: String,
+                    enum: ["manual", "slides", "audio", "other"],
+                    default: "other",
+                },
+                fileUrl: { type: String, required: true },       
+                public_id: { type: String },                     
+                order: { type: Number, default: 0 },
+            },
+        ],
     },
     { timestamps: true }
 );

@@ -186,12 +186,10 @@ exports.adminCreateProgram = async (req, res) => {
     try {
         const { name, slug } = req.body;
 
-        // ✅ Slug — manual diya toh woh use karo, nahi toh name se generate karo
         const finalSlug = slug
             ? slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")
             : name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 
-        // ✅ Duplicate slug check
         const existing = await Program.findOne({ slug: finalSlug });
         if (existing) {
             return res.status(400).json({
@@ -200,8 +198,19 @@ exports.adminCreateProgram = async (req, res) => {
             });
         }
 
+        // Clean empty optional enum / number fields
+        const body = { ...req.body };
+
+        if (body.level === "" || body.level == null) {
+            delete body.level; // omit so enum is not validated
+        }
+
+        // Optional: same idea for other fields that can be empty strings
+        if (body.price === "") body.price = 0;
+        if (body.duration_weeks === "") delete body.duration_weeks;
+
         const program = await Program.create({
-            ...req.body,
+            ...body,
             slug: finalSlug,
             created_by: req.user.id,
         });
@@ -214,7 +223,6 @@ exports.adminCreateProgram = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
-
 // GET /admin/v1/programs/:id
 exports.adminGetProgramById = async (req, res) => {
     try {
@@ -236,24 +244,31 @@ exports.adminGetProgramById = async (req, res) => {
 
 // PUT /admin/v1/programs/:id
 exports.adminUpdateProgram = async (req, res) => {
-    try {
-        const program = await Program.findByIdAndUpdate(
-            req.params.id,
-            req.body,
-            { new: true }
-        );
+  try {
+    const body = { ...req.body };
 
-        if (!program) {
-            return res.status(404).json({ message: "Program not found" });
-        }
-
-        res.status(200).json({
-            success: true,
-            data: program,
-        });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+    if (body.level === "" || body.level == null) {
+      delete body.level;
+      // or, if you want to clear it: body.level = undefined;
     }
+
+    const program = await Program.findByIdAndUpdate(
+      req.params.id,
+      body,
+      { new: true, runValidators: true }
+    );
+
+    if (!program) {
+      return res.status(404).json({ message: "Program not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: program,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
 // DELETE /admin/v1/programs/:id
@@ -932,3 +947,47 @@ exports.adminGetModuleById = async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 };
+
+// ── Material Upload Handler (manuals/slides/audio) ──
+exports.uploadMaterial = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "No file uploaded" });
+        }
+
+        const allowedMimeTypes = [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation", // pptx
+            "application/vnd.ms-powerpoint", // ppt
+            "audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/aac", "audio/mp4", "audio/x-m4a",
+        ];
+
+        if (!allowedMimeTypes.includes(req.file.mimetype)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid file type. PDF, PPT/PPTX ya audio hi allowed hai.",
+            });
+        }
+
+        const isAudio = req.file.mimetype.startsWith("audio/");
+        const base64 = req.file.buffer.toString("base64");
+        const dataUri = `data:${req.file.mimetype};base64,${base64}`;
+
+        const result = await cloudinary.uploader.upload(dataUri, {
+            folder: "program-materials",
+            resource_type: isAudio ? "video" : "raw", // PDF/PPT = raw, audio = video
+        });
+
+        return res.status(200).json({
+            success: true,
+            url: result.secure_url,
+            public_id: result.public_id,
+            format: result.format,
+        });
+    } catch (err) {
+        console.log("MATERIAL UPLOAD ERROR:", err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+};
+
+
