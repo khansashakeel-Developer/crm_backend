@@ -35,8 +35,8 @@ exports.getPrograms = async (req, res) => {
 exports.getProgramsPublic = async (req, res) => {
     try {
         const programs = await Program.find({ status: "active" })
-            .select("_id name")
-            .sort({ createdAt: 1 })   // ✅ ascending 
+            .select("_id name category")  
+            .sort({ createdAt: 1 })
             .lean();
 
         res.status(200).json({
