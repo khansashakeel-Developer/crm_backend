@@ -244,31 +244,31 @@ exports.adminGetProgramById = async (req, res) => {
 
 // PUT /admin/v1/programs/:id
 exports.adminUpdateProgram = async (req, res) => {
-  try {
-    const body = { ...req.body };
+    try {
+        const body = { ...req.body };
 
-    if (body.level === "" || body.level == null) {
-      delete body.level;
-      // or, if you want to clear it: body.level = undefined;
+        if (body.level === "" || body.level == null) {
+            delete body.level;
+            // or, if you want to clear it: body.level = undefined;
+        }
+
+        const program = await Program.findByIdAndUpdate(
+            req.params.id,
+            body,
+            { new: true, runValidators: true }
+        );
+
+        if (!program) {
+            return res.status(404).json({ message: "Program not found" });
+        }
+
+        res.status(200).json({
+            success: true,
+            data: program,
+        });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
-
-    const program = await Program.findByIdAndUpdate(
-      req.params.id,
-      body,
-      { new: true, runValidators: true }
-    );
-
-    if (!program) {
-      return res.status(404).json({ message: "Program not found" });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: program,
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
 };
 
 // DELETE /admin/v1/programs/:id
@@ -667,14 +667,30 @@ exports.adminGetBatches = async (req, res) => {
 };
 
 // POST /admin/v1/batches
+// POST /admin/v1/batches
 exports.adminCreateBatch = async (req, res) => {
     try {
-        const batch = await Batch.create(req.body);
+        const { date_required, start_date } = req.body;
+        const isDateRequired = date_required !== false; // default true
 
-        res.status(201).json({
-            success: true,
-            data: batch,
-        });
+        if (isDateRequired && !start_date) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date is required when 'Date Required' is checked.",
+            });
+        }
+
+        const payload = { ...req.body, date_required: isDateRequired };
+
+        // date_required unchecked hai to dates clear rakho
+        if (!isDateRequired) {
+            payload.start_date = undefined;
+            payload.end_date = undefined;
+        }
+
+        const batch = await Batch.create(payload);
+
+        res.status(201).json({ success: true, data: batch });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -683,16 +699,70 @@ exports.adminCreateBatch = async (req, res) => {
 // PUT /admin/v1/batches/:id
 exports.adminUpdateBatch = async (req, res) => {
     try {
+        const { date_required, start_date } = req.body;
+        const isDateRequired = date_required !== false;
+
+        if (isDateRequired && !start_date) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date is required when 'Date Required' is checked.",
+            });
+        }
+
+        const payload = { ...req.body, date_required: isDateRequired };
+
+        if (!isDateRequired) {
+            payload.start_date = null;
+            payload.end_date = null;
+        }
+
         const batch = await Batch.findByIdAndUpdate(
             req.params.id,
-            req.body,
-            { new: true }
+            payload,
+            { new: true, runValidators: true }
         );
 
-        res.status(200).json({
-            success: true,
-            data: batch,
-        });
+        if (!batch) {
+            return res.status(404).json({ message: "Batch not found" });
+        }
+
+        res.status(200).json({ success: true, data: batch });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// PUT /admin/v1/batches/:id
+exports.adminUpdateBatch = async (req, res) => {
+    try {
+        const { date_required, start_date } = req.body;
+        const isDateRequired = date_required !== false;
+
+        if (isDateRequired && !start_date) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date is required when 'Date Required' is checked.",
+            });
+        }
+
+        const payload = { ...req.body, date_required: isDateRequired };
+
+        if (!isDateRequired) {
+            payload.start_date = null;
+            payload.end_date = null;
+        }
+
+        const batch = await Batch.findByIdAndUpdate(
+            req.params.id,
+            payload,
+            { new: true, runValidators: true }
+        );
+
+        if (!batch) {
+            return res.status(404).json({ message: "Batch not found" });
+        }
+
+        res.status(200).json({ success: true, data: batch });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

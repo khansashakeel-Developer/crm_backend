@@ -11,9 +11,13 @@ const batchSchema = new mongoose.Schema(
       type: String,
       required: true, // e.g. "Batch 2026-A"
     },
+    date_required: {
+      type: Boolean,
+      default: true,
+    },
     start_date: {
       type: Date,
-      required: true,
+      // required: true,      
     },
     end_date: Date,
     max_students: {
