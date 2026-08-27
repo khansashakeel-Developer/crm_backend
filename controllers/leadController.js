@@ -1001,6 +1001,7 @@ exports.getLeads = async (req, res) => {
             assigned_to,
             quality,
             hasPaymentPlan,
+            hasInvoiceNumber
         } = req.query;
 
         const query = {};
@@ -1012,6 +1013,10 @@ exports.getLeads = async (req, res) => {
 
         if (hasPaymentPlan === "true") {
             query["paymentPlan.totalAmount"] = { $exists: true, $gt: 0 };
+        }
+
+        if (hasInvoiceNumber === "true") {
+            query["paymentPlan.invoiceNumber"] = { $exists: true, $ne: null, $ne: "" };
         }
 
         // if (search) {
