@@ -1002,7 +1002,10 @@ exports.getLeads = async (req, res) => {
             assigned_to,
             quality,
             hasPaymentPlan,
-            hasInvoiceNumber
+            hasInvoiceNumber,
+            dateFilter,   // ✅ "today" | "this_week" | "this_month" | "custom"
+            dateFrom,     // ✅ custom ke liye
+            dateTo,       // ✅ custom ke liye
         } = req.query;
 
         const query = {};
@@ -1011,6 +1014,50 @@ exports.getLeads = async (req, res) => {
         if (source) query.source = source;
         if (assigned_to) query.assigned_to = assigned_to;
         if (quality) query.quality = quality;
+
+        // ── ✅ DATE FILTER (presets + custom range) ──────────────
+        if (dateFilter && dateFilter !== "") {
+            let start, end;
+            const now = new Date();
+
+            if (dateFilter === "today") {
+                start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+                end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            } else if (dateFilter === "this_week") {
+                const day = now.getDay();
+                const diffToMonday = day === 0 ? -6 : 1 - day;
+                start = new Date(now);
+                start.setDate(now.getDate() + diffToMonday);
+                start.setHours(0, 0, 0, 0);
+                end = new Date(start);
+                end.setDate(start.getDate() + 6);
+                end.setHours(23, 59, 59, 999);
+            } else if (dateFilter === "this_month") {
+                start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+                end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+            } else if (dateFilter === "last_3_months") {                     // ✅ naya
+                start = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate(), 0, 0, 0, 0);
+                end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            } else if (dateFilter === "last_6_months") {                     // ✅ naya
+                start = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate(), 0, 0, 0, 0);
+                end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            } else if (dateFilter === "custom") {
+                if (dateFrom) {
+                    start = new Date(dateFrom);
+                    start.setHours(0, 0, 0, 0);
+                }
+                if (dateTo) {
+                    end = new Date(dateTo);
+                    end.setHours(23, 59, 59, 999);
+                }
+            }
+
+            if (start || end) {
+                query.createdAt = {};
+                if (start) query.createdAt.$gte = start;
+                if (end) query.createdAt.$lte = end;
+            }
+        }
 
         if (hasPaymentPlan === "true") {
             query["paymentPlan.totalAmount"] = { $exists: true, $gt: 0 };
@@ -1065,11 +1112,7 @@ exports.getLeads = async (req, res) => {
         res.status(200).json({
             success: true,
             data: leads,
-            meta: {
-                page: Number(page),
-                limit: Number(limit),
-                total,
-            },
+            meta: { page: Number(page), limit: Number(limit), total },
         });
     } catch (error) {
         res.status(500).json({ message: error.message });
