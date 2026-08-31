@@ -19,6 +19,7 @@ const PDFDocument = require("pdfkit");
 const JournalEntry = require("../models/journalEntryModel.js");
 const reverseJournalEntry = require("../utils/reverseJournalEntry.js");
 const { invoiceNumberExists, reserveNextInvoiceNumber } = require("../utils/invoiceNumber.js");
+const qboHooks = require("../utils/qboHooks");
 
 function getNetAmount(invoice) {
   return Math.max(0, (invoice.totalAmount || 0) - (invoice.discountAmount || 0));
@@ -366,6 +367,8 @@ exports.markInvoicePaid = async (req, res) => {
     invoice.remainingAmount = 0;
     await invoice.save();
 
+    const paidAtValue = paidDate ? new Date(paidDate) : new Date()
+
     // markInvoicePaid mein invoice.status = "PAID" ke baad:
     const payment = new Payment({
       invoice: invoice._id,
@@ -377,7 +380,8 @@ exports.markInvoicePaid = async (req, res) => {
       approvedBy: req.user._id,
       approvedAt: new Date(),
       receivedBy: req.user._id,
-      notes: "Marked as fully paid manually",
+      paidAt: paidAtValue,                                    // ✅ QBO ki TxnDate isi se banegi
+      notes: notes || `Payment for ${installment.label}`,      // ✅ QBO ki description isi se banegi
     });
     await payment.save();
 
@@ -1199,6 +1203,9 @@ exports.markInstallmentPaid = async (req, res) => {
     }
 
     await session.commitTransaction();
+
+    // ✅ ADD THIS — QBO ko payment sync karo (invoice khud-ba-khud sync ho jayegi agar pehle nahi hui)
+    qboHooks.afterPaymentApproved(payment._id);
 
     return res.json({
       success: true,
@@ -2230,6 +2237,9 @@ exports.approvePayment = async (req, res) => {
     payment.approvedBy = req.user.id;
     payment.approvedAt = new Date();
     await payment.save();
+
+    // ✅ ADD THIS
+    qboHooks.afterPaymentApproved(payment._id);
 
     // ── Invoice update ────────────────────────────────────────
     let advancePaid = false; // ✅ scope fix — upar declare karo
@@ -4104,7 +4114,7 @@ exports.confirmBulkInvoice = async (req, res) => {
 
       // ✅ Invoice creation journal — AR + Income, bilkul normal single-invoice flow jaisa
       await postInvoiceJournal({
-        amount: totalAmount,     
+        amount: totalAmount,
         discountAmount,
         invoiceId: invoice._id,
         userId: req.user._id,

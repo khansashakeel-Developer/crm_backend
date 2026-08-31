@@ -76,17 +76,23 @@ const programSchema = new mongoose.Schema(
         },
         materials: [
             {
-                title: { type: String, required: true },       
+                title: { type: String, required: true },
                 type: {
                     type: String,
                     enum: ["manual", "slides", "audio", "other"],
                     default: "other",
                 },
-                fileUrl: { type: String, required: true },       
-                public_id: { type: String },                     
+                fileUrl: { type: String, required: true },
+                public_id: { type: String },
                 order: { type: Number, default: 0 },
             },
         ],
+        qboItemId: { type: String, default: null, index: true },
+        qboSyncStatus: {
+            type: String,
+            enum: ["pending", "synced", "failed"],
+            default: "pending",
+        },
     },
     { timestamps: true }
 );

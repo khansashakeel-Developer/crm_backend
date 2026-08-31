@@ -216,6 +216,16 @@ const userSchema = new mongoose.Schema(
       createdTime: { type: Date, default: null },
     },
 
+    // ─── QuickBooks Online Sync ───────────────────────────────────
+    qboCustomerId: { type: String, default: null, index: true },
+    qboSyncStatus: {
+      type: String,
+      enum: ["pending", "synced", "failed", "skipped"],
+      default: "pending",
+    },
+    qboLastSyncedAt: { type: Date, default: null },
+    qboSyncError: { type: String, default: null },
+
   },
   { timestamps: true }
 );

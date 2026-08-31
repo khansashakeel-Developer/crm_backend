@@ -26,6 +26,7 @@
     "express-session": "^1.19.0",
     "helmet": "^8.1.0",
     "hpp": "^0.2.3",
+    "intuit-oauth": "^4.2.5",
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.4",

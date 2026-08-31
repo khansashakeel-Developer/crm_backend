@@ -52,6 +52,16 @@ const paymentSchema = new mongoose.Schema(
     voidedAt: Date,
 
     notes: String,
+
+    // ─── QuickBooks Online Sync ───────────────────────────────────
+    qboPaymentId: { type: String, default: null, index: true },
+    qboSyncStatus: {
+      type: String,
+      enum: ["pending", "synced", "failed", "skipped"],
+      default: "pending",
+    },
+    qboLastSyncedAt: { type: Date, default: null },
+    qboSyncError: { type: String, default: null },
   },
   { timestamps: true }
 );

@@ -17,6 +17,7 @@ const { postInvoiceJournal } = require("../utils/postInvoiceJournal.js");
 const sendPaymentPlanInvoiceEmail = require("../utils/sendPaymentPlanInvoiceEmail.js");
 const { invoiceNumberExists, reserveNextInvoiceNumber } = require("../utils/invoiceNumber.js");
 const { sendServerSideStageEvent } = require("../libs/metaServerEvents.js");
+const qboHooks = require("../utils/qboHooks");
 const ExcelJS = require("exceljs");
 
 
@@ -2020,6 +2021,8 @@ exports.convertLead = async (req, res) => {
         } catch (journalErr) {
             console.error("postInvoiceJournal failed:", journalErr.message);
         }
+
+        qboHooks.afterInvoiceCreated(invoice._id, user._id);
 
         lead.invoiceNumber = invoiceNumber;
         await lead.save();

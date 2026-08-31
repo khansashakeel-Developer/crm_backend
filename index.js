@@ -30,6 +30,7 @@ const guideRoute = require("./routes/guideRoutes.js");
 const audioFileAccessRoute = require("./routes/audioFileAccessRoutes.js");
 const visitorRoute = require("./routes/visitorRoute.js");
 const webinarRoute = require("./routes/webinarRoute.js");
+const qboRoute = require("./routes/qboRoutes.js");
 
 
 const connectDB = require("./config/db.js");
@@ -166,6 +167,7 @@ app.use("/api/v1/audio-access", audioFileAccessRoute);
 //chatbot visitor routes
 app.use("/api/v1/visitors", visitorRoute);
 app.use('/api/webinars', webinarRoute);
+app.use("/api/qbo", qboRoute);
 
 // ======================
 // ✅ HEALTH CHECK

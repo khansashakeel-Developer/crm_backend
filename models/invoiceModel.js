@@ -52,6 +52,16 @@ const invoiceSchema = new mongoose.Schema(
       receiptPublicId: { type: String, default: null },
       paymentId: { type: mongoose.Schema.Types.ObjectId, ref: "Payment", default: null },
     }],
+
+    // ─── QuickBooks Online Sync ───────────────────────────────────
+    qboInvoiceId: { type: String, default: null, index: true },
+    qboSyncStatus: {
+      type: String,
+      enum: ["pending", "synced", "failed", "skipped"],
+      default: "pending",
+    },
+    qboLastSyncedAt: { type: Date, default: null },
+    qboSyncError: { type: String, default: null },
   },
   { timestamps: true }
 );
