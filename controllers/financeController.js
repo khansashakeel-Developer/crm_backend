@@ -19,7 +19,7 @@ const PDFDocument = require("pdfkit");
 const JournalEntry = require("../models/journalEntryModel.js");
 const reverseJournalEntry = require("../utils/reverseJournalEntry.js");
 const { invoiceNumberExists, reserveNextInvoiceNumber } = require("../utils/invoiceNumber.js");
-const qboHooks = require("../utils/qboHooks");
+const generateReceivingInvoiceTemplate = require("../template/generate-receiving-invoice.js");
 
 function getNetAmount(invoice) {
   return Math.max(0, (invoice.totalAmount || 0) - (invoice.discountAmount || 0));
@@ -2644,38 +2644,41 @@ exports.sendInvoiceEmail = async (req, res) => {
         const isAdv = inst.isAdvance;
         const isPaid = inst.status === "PAID";
         return `
-        <tr style="background:${isAdv ? "#fdf6e3" : "#ffffff"}; border-bottom:1px solid #dde2ec;">
-          <td style="padding:13px 16px; font-size:11px; color:#8a92a6;">${String(i + 1).padStart(2, "0")}</td>
-          <td style="padding:13px 16px; font-size:13px; color:#0f1117; font-weight:700;">
-            ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
-            ${isAdv ? `<span style="background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">
-          ${quantity}
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060; text-transform:capitalize;">
-          ${inst.method || "—"}
-          </td>
-
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">
-          ${inst.referenceNumber || "—"}
-          </td>
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
-          <td style="padding:13px 16px;">
-            <span style="font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:5px;
-              background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
-              ${inst.status}
-            </span>
-          </td>
-          <td style="padding:13px 16px; text-align:right; font-weight:600; font-size:13px;">
-            Rs ${formatAmount(inst.amount)}
-          </td>
-        </tr>`;
+    <tr style="background:${isAdv ? "#fdf6e3" : "#ffffff"}; border-bottom:1px solid #dde2ec;">
+      <td style="padding:13px 16px; font-size:11px; color:#8a92a6;">${String(i + 1).padStart(2, "0")}</td>
+      <td style="padding:13px 16px; font-size:13px; color:#0f1117; font-weight:700;">
+        ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
+        ${isAdv ? `<span style="background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
+      </td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${quantity}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060; text-transform:capitalize;">${inst.method || "—"}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${inst.referenceNumber || "—"}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
+      <td style="padding:13px 16px;">
+        <span style="font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:5px;
+          background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
+          ${inst.status}
+        </span>
+      </td>
+      <td style="padding:13px 16px; text-align:right; font-weight:600; font-size:13px;">
+        Rs ${formatAmount(inst.amount)}
+      </td>
+    </tr>`;
       })
       .join("");
 
     const contractDetails = invoice.enrollment?.leadSnapshot?.contractDetails;
+
+    const grossAmount = invoice.totalAmount || 0;
+    const discountAmount = invoice.discountAmount || 0;
+    const netAmount = Math.max(0, grossAmount - discountAmount);
+
+    const discountRow = discountAmount > 0
+      ? `<tr style="border-bottom:1px solid #dde2ec;">
+      <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Discount</td>
+      <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">- Rs ${formatAmount(discountAmount)}</td>
+    </tr>`
+      : "";
 
     await sendEmailDynamic({
       to: user.email,
@@ -2704,7 +2707,10 @@ exports.sendInvoiceEmail = async (req, res) => {
         programName: program?.name || "Program",
         planNotes: invoice.notes || "",
         installmentRows,
-        totalAmount: formatAmount(invoice.totalAmount),
+        totalAmount: formatAmount(grossAmount),
+        discountAmount: formatAmount(discountAmount),
+        netAmount: formatAmount(netAmount),
+        discountRow,
         paidAmount: formatAmount(invoice.paidAmount || 0),
         remainingAmount: formatAmount(invoice.remainingAmount || invoice.totalAmount),
         advanceAmount: formatAmount(
@@ -3266,109 +3272,145 @@ exports.exportPaymentsPdf = async (req, res) => {
 //   res.end();
 // };
 
-// exports.sendReceivingInvoiceEmail = async (req, res) => {
-//   try {
-//     const invoice = await Invoice.findById(req.params.id)
-//       .populate("user", "name email phone")
-//       .populate({
-//         path: "enrollment",
-//         populate: [
-//           { path: "program", select: "name" },
-//           { path: "batch", select: "name start_date end_date" },
-//         ],
-//       });
+exports.sendReceivingInvoiceEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { sendAll, installmentId } = req.body; // ← this was never being read before
 
-//     if (!invoice)
-//       return res.status(404).json({ success: false, message: "Invoice not found" });
+    const invoice = await Invoice.findById(id)
+      .populate("user", "name email phone")
+      .populate({
+        path: "enrollment",
+        populate: [
+          { path: "program", select: "name" },
+          { path: "batch", select: "name start_date end_date" },
+        ],
+      });
 
-//     const user = invoice.user;
-//     const program = invoice.enrollment?.program;
+    if (!invoice)
+      return res.status(404).json({ success: false, message: "Invoice not found" });
 
-//     const formatDate = (d) =>
-//       d ? new Date(d).toLocaleDateString("en-PK", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+    // ── Only the installment(s) THIS receipt is for ──────────────
+    let selectedInstallments;
+    if (sendAll) {
+      selectedInstallments = invoice.installments.filter((i) => i.status === "PAID");
+    } else {
+      if (!installmentId) {
+        return res.status(400).json({ success: false, message: "installmentId required when sendAll is false" });
+      }
+      const found = invoice.installments.id(installmentId); // subdoc lookup, same pattern used elsewhere in this file
+      if (!found) {
+        return res.status(404).json({ success: false, message: "Installment not found on this invoice" });
+      }
+      if (found.status !== "PAID") {
+        return res.status(400).json({ success: false, message: "Selected installment is not paid yet" });
+      }
+      selectedInstallments = [found];
+    }
 
-//     const formatAmount = (n) => Number(n || 0).toLocaleString("en-PK");
+    if (!selectedInstallments.length) {
+      return res.status(400).json({ success: false, message: "No paid installment(s) to receipt" });
+    }
 
-//     const installmentRows = invoice.installments
-//       .map((inst, i) => {
-//         const isAdv = inst.isAdvance;
-//         const isPaid = inst.status === "PAID";
-//         return `
-//         <tr style="background:${isAdv ? "#fdf6e3" : "#ffffff"}; border-bottom:1px solid #dde2ec;">
-//           <td style="padding:13px 16px; font-size:11px; color:#8a92a6;">${String(i + 1).padStart(2, "0")}</td>
-//           <td style="padding:13px 16px; font-size:13px; color:#0f1117; font-weight:700;">
-//             ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
-//             ${isAdv ? `<span style="background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
-//           </td>
-//           <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
-//           <td style="padding:13px 16px;">
-//             <span style="font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:5px;
-//               background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
-//               ${inst.status}
-//             </span>
-//           </td>
-//           <td style="padding:13px 16px; text-align:right; font-weight:600; font-size:13px;">
-//             Rs ${formatAmount(inst.amount)}
-//           </td>
-//         </tr>`;
-//       })
-//       .join("");
+    const user = invoice.user;
+    const program = invoice.enrollment?.program;
 
-//     const contractDetails = invoice.enrollment?.leadSnapshot?.contractDetails;
+    const formatDate = (d) =>
+      d ? new Date(d).toLocaleDateString("en-PK", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
-//     await sendEmailDynamic({
-//       to: user.email,
-//       subject: `Invoice Reminder: ${invoice.invoiceNumber} | ALCO`,
-//       templateName: "generate-receiving-invoice",
-//       replacements: {
-//         invoiceNumber: invoice.invoiceNumber,
-//         invoiceStatus: invoice.status,
-//         issueDate: formatDate(new Date()),
-//         advanceDueDate: formatDate(invoice.dueDate),
-//         enrollmentId:
-//           invoice.enrollment?._id?.toString().slice(0, 8) +
-//           "..." +
-//           invoice.enrollment?._id?.toString().slice(-4),
-//         studentName: user.name,
-//         studentEmail: user.email,
-//         studentPhone: user.phone || "—",
-//         salesManagerName: "Finance Team",
-//         salesManagerEmail: "finance@alco.com",
-//         batchName: invoice.enrollment?.batch?.name || "—",
-//         batchStartDate: formatDate(invoice.enrollment?.batch?.start_date),
-//         batchEndDate: formatDate(invoice.enrollment?.batch?.end_date),
-//         studentCnic: contractDetails?.cnic || "—",
-//         studentAddress: contractDetails?.currentAddress || "—",
-//         studentProfession: contractDetails?.occupation || "—",
-//         programName: program?.name || "Program",
-//         planNotes: invoice.notes || "",
-//         installmentRows,
-//         totalAmount: formatAmount(invoice.totalAmount),
-//         paidAmount: formatAmount(invoice.paidAmount || 0),
-//         remainingAmount: formatAmount(invoice.remainingAmount || invoice.totalAmount),
-//         advanceAmount: formatAmount(
-//           invoice.installments.find((i) => i.isAdvance)?.amount || 0
-//         ),
-//       },
-//     });
+    const formatAmount = (n) => Number(n || 0).toLocaleString("en-PK");
 
-//     await logAudit({
-//       req,
-//       action: "INVOICE_EMAIL_SENT",
-//       module: "finance",
-//       targetId: invoice._id,
-//       after: { sentTo: user.email, sentAt: new Date() },
-//     });
+    // ← was invoice.installments.map(...) — now only the selected ones
+    const installmentRows = selectedInstallments
+      .map((inst, i) => {
+        const isAdv = inst.isAdvance;
+        const receiptCell = inst.receiptUrl
+          ? `<a href="${inst.receiptUrl}" target="_blank" style="color:#1a3a5c;font-size:11.5px;font-weight:700;text-decoration:none;border-bottom:1px solid #c8a84b;">View Receipt</a>`
+          : `<span style="color:#8a92a6;font-size:11.5px;">—</span>`;
 
-//     res.json({
-//       success: true,
-//       message: `Invoice email ${user.email} ko bhej diya gaya`,
-//     });
-//   } catch (err) {
-//     console.error("sendInvoiceEmail error:", err.message);
-//     res.status(500).json({ success: false, message: err.message });
-//   }
-// };
+        return `
+    <tr style="border-bottom:1px solid #dde2ec;">
+      <td style="padding:13px 16px;font-size:13px;color:#0f1117;font-weight:700;">
+        ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
+      </td>
+      <td style="padding:13px 16px;font-size:13px;color:#4a5060;text-transform:capitalize;">${inst.method || "—"}</td>
+      <td style="padding:13px 16px;font-family:'Courier New',monospace;font-size:12px;color:#4a5060;">${inst.referenceNumber || "—"}</td>
+      <td style="padding:13px 16px;font-family:'Courier New',monospace;font-size:11.5px;color:#4a5060;">${formatDate(inst.paidAt || inst.dueDate)}</td>
+      <td style="padding:13px 16px;text-align:center;">${receiptCell}</td>
+      <td style="padding:13px 16px;text-align:right;font-family:'Courier New',monospace;font-weight:600;font-size:13.5px;">Rs ${formatAmount(inst.paidAmount ?? inst.amount)}</td>
+    </tr>`;
+      })
+      .join("");
+
+    const receiptTotal = selectedInstallments.reduce(
+      (sum, i) => sum + Number(i.paidAmount ?? i.amount ?? 0),
+      0
+    );
+
+    const contractDetails = invoice.enrollment?.leadSnapshot?.contractDetails;
+
+    const grossAmount = invoice.totalAmount || 0;
+    const discountAmount = invoice.discountAmount || 0;
+    const netAmount = Math.max(0, grossAmount - discountAmount);
+
+    const discountRow = discountAmount > 0
+      ? `<tr style="border-bottom:1px solid #dde2ec;">
+      <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Discount</td>
+      <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">- Rs ${formatAmount(discountAmount)}</td>
+    </tr>`
+      : "";
+
+    await sendEmailDynamic({
+      to: user.email,
+      subject: `Payment Receipt — Invoice ${invoice.invoiceNumber} | ALCO`,
+      templateName: "generate-receiving-invoice",
+      replacements: {
+        invoiceNumber: invoice.invoiceNumber,
+        receiptDate: formatDate(new Date()),
+        enrollmentId:
+          invoice.enrollment?._id?.toString().slice(0, 8) +
+          "..." +
+          invoice.enrollment?._id?.toString().slice(-4),
+        studentName: user.name,
+        studentEmail: user.email,
+        studentPhone: user.phone || "—",
+        salesManagerName: "Finance Team",
+        salesManagerEmail: "finance@alco.com",
+        programName: program?.name || "Program",
+        installmentRows,
+        receiptTotal: formatAmount(receiptTotal),
+        totalAmount: formatAmount(grossAmount),
+        discountAmount: formatAmount(discountAmount),
+        netAmount: formatAmount(netAmount),
+        discountRow,
+        paidAmount: formatAmount(invoice.paidAmount || 0),
+        remainingAmount: formatAmount(invoice.remainingAmount || 0),
+      },
+    });
+
+    await logAudit({
+      req,
+      action: "RECEIVING_INVOICE_EMAIL_SENT",
+      module: "finance",
+      targetId: invoice._id,
+      after: {
+        sentTo: user.email,
+        sentAt: new Date(),
+        sendAll: !!sendAll,
+        installmentId: installmentId || null,
+        receiptTotal,
+      },
+    });
+
+    res.json({
+      success: true,
+      message: `Receipt (${sendAll ? "all paid installments" : "1 installment"}) bhej diya gaya to ${user.email}`,
+    });
+  } catch (err) {
+    console.error("sendReceivingInvoiceEmail error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // GET — Sales Manager ki assigned leads ki invoices
 exports.getSalesRoleInvoices = async (req, res) => {

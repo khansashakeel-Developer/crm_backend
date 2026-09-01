@@ -5,6 +5,7 @@ module.exports = `
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <meta name="format-detection" content="telephone=no, date=no, address=no, email=no, url=no" />
   <title>Invoice</title>
 </head>
 
@@ -31,10 +32,12 @@ module.exports = `
                   </tr>
                 </table>
                 <div style="font-size:11.5px;color:#94a3b8;line-height:1.7;margin-top:14px;">
-                  D86/1, block 7, Gulshan-e-iqbal, karachi, Sindh PK<br />
-                  connect@arslanlarik.com &nbsp;|&nbsp; 1+8886814808<br />
-                  https://arslanlarik.com/
-                </div>
+  D86/1, block 7, Gulshan-e-iqbal, karachi, Sindh PK<br />
+  <a href="mailto:connect@arslanlarik.com" style="color:#94a3b8 !important;text-decoration:none !important;">connect@arslanlarik.com</a>
+  &nbsp;|&nbsp;
+  <a href="tel:+8886814808" style="color:#94a3b8 !important;text-decoration:none !important;">1+8886814808</a><br />
+  <a href="https://arslanlarik.com/" style="color:#94a3b8 !important;text-decoration:none !important;">https://arslanlarik.com/</a>
+</div>
               </td>
               <td style="vertical-align:top;text-align:right;">
                 <div
@@ -196,29 +199,26 @@ module.exports = `
             <table width="100%" cellpadding="0" cellspacing="0"
               style="border:1px solid #dde2ec;border-radius:14px;overflow:hidden;border-collapse:collapse;">
               <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Subtotal</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">
-                  Rs {{totalAmount}}</td>
-              </tr>
-              <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Amount Paid</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#1a8a57;font-size:13px;">
-                  Rs {{paidAmount}}</td>
-              </tr>
-              <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Outstanding Balance</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">
-                  Rs {{remainingAmount}}</td>
-              </tr>
-              <tr style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);">
-                <td style="padding:11px 18px;font-size:14px;color:#94a3b8;font-weight:600;">Total Invoice Amount</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:700;color:#ffffff;font-size:15px;">
-                  Rs {{totalAmount}}</td>
-              </tr>
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Subtotal (Gross)</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">Rs {{totalAmount}}</td>
+</tr>
+{{discountRow}}
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Net Total</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">Rs {{netAmount}}</td>
+</tr>
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Amount Paid</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#1a8a57;font-size:13px;">Rs {{paidAmount}}</td>
+</tr>
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Outstanding Balance</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">Rs {{remainingAmount}}</td>
+</tr>
+<tr style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);">
+  <td style="padding:11px 18px;font-size:14px;color:#94a3b8;font-weight:600;">Total Invoice Amount</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:700;color:#ffffff;font-size:15px;">Rs {{netAmount}}</td>
+</tr>
             </table>
           </td>
         </tr>
