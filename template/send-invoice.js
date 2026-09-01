@@ -245,30 +245,27 @@ module.exports = `
           <td style="width:320px;">
             <table width="100%" cellpadding="0" cellspacing="0"
               style="border:1px solid #dde2ec;border-radius:14px;overflow:hidden;border-collapse:collapse;">
-              <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Subtotal</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">
-                  Rs {{totalAmount}}</td>
-              </tr>
-              <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Amount Paid</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#1a8a57;font-size:13px;">
-                  Rs {{paidAmount}}</td>
-              </tr>
-              <tr style="border-bottom:1px solid #dde2ec;">
-                <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Outstanding Balance</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">
-                  Rs {{remainingAmount}}</td>
-              </tr>
-              <tr style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);">
-                <td style="padding:11px 18px;font-size:14px;color:#94a3b8;font-weight:600;">Total Invoice Amount</td>
-                <td
-                  style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:700;color:#ffffff;font-size:15px;">
-                  Rs {{totalAmount}}</td>
-              </tr>
+             <tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Subtotal (Gross)</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">Rs {{totalAmount}}</td>
+</tr>
+{{discountRow}}
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Net Total</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#0f1117;font-size:13px;">Rs {{netAmount}}</td>
+</tr>
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Amount Paid</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#1a8a57;font-size:13px;">Rs {{paidAmount}}</td>
+</tr>
+<tr style="border-bottom:1px solid #dde2ec;">
+  <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Outstanding Balance</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">Rs {{remainingAmount}}</td>
+</tr>
+<tr style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);">
+  <td style="padding:11px 18px;font-size:14px;color:#94a3b8;font-weight:600;">Total Invoice Amount</td>
+  <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:700;color:#ffffff;font-size:15px;">Rs {{netAmount}}</td>
+</tr>
             </table>
           </td>
         </tr>

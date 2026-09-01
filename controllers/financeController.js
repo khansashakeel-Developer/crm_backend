@@ -2635,34 +2635,26 @@ exports.sendInvoiceEmail = async (req, res) => {
         const isAdv = inst.isAdvance;
         const isPaid = inst.status === "PAID";
         return `
-        <tr style="background:${isAdv ? "#fdf6e3" : "#ffffff"}; border-bottom:1px solid #dde2ec;">
-          <td style="padding:13px 16px; font-size:11px; color:#8a92a6;">${String(i + 1).padStart(2, "0")}</td>
-          <td style="padding:13px 16px; font-size:13px; color:#0f1117; font-weight:700;">
-            ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
-            ${isAdv ? `<span style="background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">
-          ${quantity}
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060; text-transform:capitalize;">
-          ${inst.method || "—"}
-          </td>
-
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">
-          ${inst.referenceNumber || "—"}
-          </td>
-          </td>
-          <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
-          <td style="padding:13px 16px;">
-            <span style="font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:5px;
-              background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
-              ${inst.status}
-            </span>
-          </td>
-          <td style="padding:13px 16px; text-align:right; font-weight:600; font-size:13px;">
-            Rs ${formatAmount(inst.amount)}
-          </td>
-        </tr>`;
+    <tr style="background:${isAdv ? "#fdf6e3" : "#ffffff"}; border-bottom:1px solid #dde2ec;">
+      <td style="padding:13px 16px; font-size:11px; color:#8a92a6;">${String(i + 1).padStart(2, "0")}</td>
+      <td style="padding:13px 16px; font-size:13px; color:#0f1117; font-weight:700;">
+        ${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}
+        ${isAdv ? `<span style="background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
+      </td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${quantity}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060; text-transform:capitalize;">${inst.method || "—"}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${inst.referenceNumber || "—"}</td>
+      <td style="padding:13px 16px; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
+      <td style="padding:13px 16px;">
+        <span style="font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:5px;
+          background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
+          ${inst.status}
+        </span>
+      </td>
+      <td style="padding:13px 16px; text-align:right; font-weight:600; font-size:13px;">
+        Rs ${formatAmount(inst.amount)}
+      </td>
+    </tr>`;
       })
       .join("");
 
@@ -3348,6 +3340,17 @@ exports.sendReceivingInvoiceEmail = async (req, res) => {
 
     const contractDetails = invoice.enrollment?.leadSnapshot?.contractDetails;
 
+    const grossAmount = invoice.totalAmount || 0;
+    const discountAmount = invoice.discountAmount || 0;
+    const netAmount = Math.max(0, grossAmount - discountAmount);
+
+    const discountRow = discountAmount > 0
+      ? `<tr style="border-bottom:1px solid #dde2ec;">
+      <td style="padding:11px 18px;font-size:13px;color:#4a5060;font-weight:500;">Discount</td>
+      <td style="padding:11px 18px;text-align:right;font-family:'Courier New',monospace;font-weight:600;color:#c94040;font-size:13px;">- Rs ${formatAmount(discountAmount)}</td>
+    </tr>`
+      : "";
+
     await sendEmailDynamic({
       to: user.email,
       subject: `Payment Receipt — Invoice ${invoice.invoiceNumber} | ALCO`,
@@ -3365,9 +3368,12 @@ exports.sendReceivingInvoiceEmail = async (req, res) => {
         salesManagerName: "Finance Team",
         salesManagerEmail: "finance@alco.com",
         programName: program?.name || "Program",
-        installmentRows,           // ← now scoped, not the full schedule
+        installmentRows,
         receiptTotal: formatAmount(receiptTotal),
-        totalAmount: formatAmount(invoice.totalAmount),
+        totalAmount: formatAmount(grossAmount),
+        discountAmount: formatAmount(discountAmount),
+        netAmount: formatAmount(netAmount),
+        discountRow,
         paidAmount: formatAmount(invoice.paidAmount || 0),
         remainingAmount: formatAmount(invoice.remainingAmount || 0),
       },
