@@ -1169,11 +1169,25 @@ exports.adminExportBatchPayments = async (req, res) => {
                 </html>
             `;
 
-            const puppeteer = (await import("puppeteer")).default;
-            const browser = await puppeteer.launch({
-                headless: "new",
-                args: ["--no-sandbox", "--disable-setuid-sandbox"],
-            });
+            const isVercel = !!process.env.VERCEL;
+
+            let browser;
+            if (isVercel) {
+                const chromium = (await import("@sparticuz/chromium")).default;
+                const puppeteerCore = (await import("puppeteer-core")).default;
+                browser = await puppeteerCore.launch({
+                    args: chromium.args,
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath: await chromium.executablePath(),
+                    headless: chromium.headless,
+                });
+            } else {
+                const puppeteer = (await import("puppeteer")).default;
+                browser = await puppeteer.launch({
+                    headless: "new",
+                    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+                });
+            }
             const page = await browser.newPage();
             await page.setContent(html, { waitUntil: "networkidle0" });
 
