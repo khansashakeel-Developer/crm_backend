@@ -42,6 +42,7 @@ const {
   adminCreateBatch,
   adminUpdateBatch,
   adminDeleteBatch,
+  adminExportBatchPayments, //khansa
   // Admin — Batch Student Management
   adminAddStudentToBatch,
   adminRemoveStudentFromBatch,
@@ -146,6 +147,7 @@ router.post("/:id/duplicate", protect, authorize("admin", "super_admin"), adminD
 // ── ADMIN — Batches ──
 router.get("/batches", protect, authorize("admin", "super_admin", "sales_manager", "sales_rep", "finance_manager"), adminGetBatches);
 router.get("/batches/:id", protect, authorize("admin", "super_admin", "sales_manager", "sales_rep", "finance_manager"), adminGetBatchById);
+router.get("/batches/:id/export", protect, authorize("admin", "super_admin", "sales_manager", "sales_rep", "finance_manager"), adminExportBatchPayments); //khansa
 router.post("/batches", protect, authorize("admin", "super_admin", "finance_manager"), adminCreateBatch);
 router.put("/batches/:id", protect, authorize("admin", "super_admin", "finance_manager"), adminUpdateBatch);
 router.delete("/batches/:id", protect, authorize("admin", "super_admin", "finance_manager"), adminDeleteBatch);

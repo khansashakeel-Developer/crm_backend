@@ -1319,7 +1319,7 @@ exports.assignLead = async (req, res) => {
 //                 phone: lead.phone,
 //                 cnic: lead.contractDetails?.cnic || "",
 //                 address: lead.contractDetails?.currentAddress || "",
-//                 role: "student",
+//                 role: "user,
 //                 password: tempPassword,
 //             });
 //         }
@@ -1566,7 +1566,7 @@ exports.assignLead = async (req, res) => {
 //                 phone: lead.phone,
 //                 cnic: lead.contractDetails?.cnic || "",
 //                 address: lead.contractDetails?.currentAddress || "",
-//                 role: "student",
+//                 role: "user",
 //                 password: tempPassword,
 //             });
 //         }
@@ -1896,7 +1896,7 @@ exports.convertLead = async (req, res) => {
                 phone: lead.phone,
                 cnic: lead.contractDetails?.cnic || "",
                 address: lead.contractDetails?.currentAddress || "",
-                role: "student",
+                role: "user",
                 password: tempPassword,
             });
         }
@@ -2271,7 +2271,7 @@ exports.convertLeadBundle = async (req, res) => {
                 phone: lead.phone,
                 cnic: lead.contractDetails?.cnic || "",
                 address: lead.contractDetails?.currentAddress || "",
-                role: "student",
+                role: "user",
                 password: tempPassword,
             });
         }
