@@ -505,6 +505,7 @@
 const axios = require("axios");
 const OAuthClient = require("intuit-oauth");
 const QboToken = require("../models/qboTokenModel");
+const User = require("../models/userModel");
 
 const isProd = process.env.QBO_ENVIRONMENT === "production";
 const ENV_KEY = isProd ? "production" : "sandbox";
@@ -626,6 +627,7 @@ async function qboRequest(method, path, data = null, options = {}) {
 async function findOrCreateCustomer(user, options = {}) {
   if (!user) throw new Error("User is required");
 
+  // Step 1: agar CRM mein already qboCustomerId save hai, wahi use karo
   if (user.qboCustomerId) {
     try {
       const data = await qboRequest("GET", `/customer/${user.qboCustomerId}`);
@@ -691,18 +693,25 @@ async function syncCustomer(userDoc, options = {}) {
       console.log(`[QBO DRY RUN] Would set user.qboCustomerId = ${customer.Id}`);
       return customer;
     }
-    userDoc.qboCustomerId = customer.Id;
-    userDoc.qboSyncStatus = "synced";
-    userDoc.qboLastSyncedAt = new Date();
-    userDoc.qboSyncError = null;
-    await userDoc.save();
+
+    const updatePayload = {
+      qboCustomerId: customer.Id,
+      qboSyncStatus: "synced",
+      qboLastSyncedAt: new Date(),
+      qboSyncError: null,
+    };
+
+    await User.findByIdAndUpdate(
+      userDoc._id,
+      { $set: updatePayload },
+      { runValidators: false, session: options.session }  // ✅ sirf changed fields, poora doc validate nahi hota
+    );
+
+    // in-memory object bhi update kar do taake baaki code (jaise createQboInvoice) turant sahi value use kare
+    Object.assign(userDoc, updatePayload);
+
     return customer;
   } catch (err) {
-    if (!options.dryRun) {
-      userDoc.qboSyncStatus = "failed";
-      userDoc.qboSyncError = err.message;
-      await userDoc.save().catch(() => { });
-    }
     throw err;
   }
 }
@@ -714,10 +723,19 @@ async function syncCustomer(userDoc, options = {}) {
 async function findOrCreateItem(programDoc, options = {}) {
   if (!programDoc) throw new Error("Program is required");
 
+  const desiredIncomeAccountId = programDoc.qboIncomeAccountId || process.env.QBO_DEFAULT_INCOME_ACCOUNT_ID;
+  if (!desiredIncomeAccountId) {
+    throw new Error(`QBO income account not set for program "${programDoc.name}" — set qboIncomeAccountId`);
+  }
+
   if (programDoc.qboItemId) {
     try {
       const data = await qboRequest("GET", `/item/${programDoc.qboItemId}`);
-      return data.Item;
+      const item = data.Item;
+      if (item.IncomeAccountRef?.value !== desiredIncomeAccountId) {
+        return await updateItemIncomeAccount(item, desiredIncomeAccountId, options);
+      }
+      return item;
     } catch (e) {
       console.warn(`[QBO] Stored qboItemId ${programDoc.qboItemId} invalid, re-matching`);
     }
@@ -727,17 +745,20 @@ async function findOrCreateItem(programDoc, options = {}) {
   const query = `SELECT * FROM Item WHERE Name = '${name.replace(/'/g, "\\'")}'`;
   const data = await qboRequest("GET", `/query?query=${encodeURIComponent(query)}&minorversion=65`);
   const existing = data.QueryResponse?.Item || [];
-  if (existing.length) return existing[0];
 
-  const incomeAccountId = process.env.QBO_DEFAULT_INCOME_ACCOUNT_ID;
-  if (!incomeAccountId) {
-    throw new Error("QBO_DEFAULT_INCOME_ACCOUNT_ID not set — cannot create Item");
+  if (existing.length) {
+    const item = existing[0];
+    // ✅ purana item galat (e.g. Checking/generic) account pe hai to sahi sub-account pe fix karo
+    if (item.IncomeAccountRef?.value !== desiredIncomeAccountId) {
+      return await updateItemIncomeAccount(item, desiredIncomeAccountId, options);
+    }
+    return item;
   }
 
   const payload = {
     Name: name,
     Type: "Service",
-    IncomeAccountRef: { value: incomeAccountId },
+    IncomeAccountRef: { value: desiredIncomeAccountId },
     UnitPrice: programDoc.price || 0,
   };
 
@@ -753,6 +774,21 @@ async function findOrCreateItem(programDoc, options = {}) {
     }
     throw err;
   }
+}
+
+async function updateItemIncomeAccount(item, incomeAccountId, options = {}) {
+  if (options.dryRun) {
+    console.log(`[QBO DRY RUN] Would update Item ${item.Id} IncomeAccountRef → ${incomeAccountId}`);
+    return { ...item, IncomeAccountRef: { value: incomeAccountId } };
+  }
+  const payload = {
+    Id: item.Id,
+    SyncToken: item.SyncToken,
+    sparse: true,
+    IncomeAccountRef: { value: incomeAccountId },
+  };
+  const updated = await qboRequest("POST", "/item?minorversion=65", payload, options);
+  return updated.Item || updated;
 }
 
 async function syncProgramItem(programDoc, options = {}) {
@@ -803,10 +839,19 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
   const Enrollment = require("../models/enrollmentModel");
   const lines = [];
 
-  async function resolveItemId(programId) {
+  async function resolveItemId(programId, feeType) {
     if (!programId) return process.env.QBO_DEFAULT_ITEM_ID || null;
     const program = await Program.findById(programId);
     if (!program) return process.env.QBO_DEFAULT_ITEM_ID || null;
+
+    if (feeType === "certificate") {
+      if (program.qboCertificateItemId) return program.qboCertificateItemId;
+      console.warn(`[QBO] No qboCertificateItemId for "${program.name}" — falling back to main program item`);
+    } else if (feeType === "manual") {
+      if (program.qboManualItemId) return program.qboManualItemId;
+      console.warn(`[QBO] No qboManualItemId for "${program.name}" — falling back to main program item`);
+    }
+
     if (!program.qboItemId || program.qboSyncStatus !== "synced") {
       const item = await syncProgramItem(program, options);
       return item.Id;
@@ -814,45 +859,120 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
     return program.qboItemId;
   }
 
-  if (invoice.isBundle && Array.isArray(invoice.items) && invoice.items.length) {
+
+  // if (Array.isArray(invoice.items) && invoice.items.length) {
+  //   const totalDiscount = Number(invoice.discountAmount || 0);
+
+  //   for (const item of invoice.items) {
+  //     let gross = Number(item.amount || 0);
+  //     if (gross <= 0) continue;
+
+  //     // ✅ Discount sirf program fee pe lagta hai — QBO ko program line ki
+  //     // GROSS (discount se pehle wali) amount bhejo, taake QBO ka apna
+  //     // Discount line sahi subtract kar sake. Certificate/Manual lines
+  //     // untouched rehte hain — unme discount kabhi add/subtract nahi hota.
+  //     const isProgramLine = !item.feeType || item.feeType === "program";
+  //     if (isProgramLine && totalDiscount > 0) {
+  //       gross += totalDiscount;
+  //     }
+
+  //     const itemId = await resolveItemId(item.program, item.feeType);
+  //     lines.push({
+  //       Amount: gross,
+  //       DetailType: "SalesItemLineDetail",
+  //       Description: item.programName || "Program Fee",
+  //       SalesItemLineDetail: {
+  //         ItemRef: itemId ? { value: itemId } : undefined,
+  //         UnitPrice: gross,
+  //         Qty: 1,
+  //       },
+  //     });
+  //   }
+
+  //   if (totalDiscount > 0) {
+  //     const discountAccountId = process.env.QBO_DISCOUNT_ACCOUNT_ID;
+  //     lines.push({
+  //       Amount: totalDiscount,
+  //       DetailType: "DiscountLineDetail",
+  //       Description: "Discount",
+  //       DiscountLineDetail: {
+  //         PercentBased: false,
+  //         ...(discountAccountId ? { DiscountAccountRef: { value: discountAccountId } } : {}),
+  //       },
+  //     });
+  //   }
+  // }
+  if (Array.isArray(invoice.items) && invoice.items.length) {
+    let totalItemDiscount = 0;
     for (const item of invoice.items) {
-      const amount = Number(item.amount || 0) - Number(item.discount || 0);
-      if (amount <= 0) continue;
-      const itemId = await resolveItemId(item.program);
+      const gross = Number(item.amount || 0) - Number(item.discount || 0);
+      if (gross <= 0) continue;
+      const itemId = await resolveItemId(item.program, item.feeType);
       lines.push({
-        Amount: amount,
+        Amount: gross,
         DetailType: "SalesItemLineDetail",
         Description: item.programName || "Program Fee",
         SalesItemLineDetail: {
           ItemRef: itemId ? { value: itemId } : undefined,
-          UnitPrice: amount,
+          UnitPrice: gross,
           Qty: 1,
+        },
+      });
+      totalItemDiscount += Number(item.discount || 0);
+    }
+
+    const discount = totalItemDiscount || Number(invoice.discountAmount || 0);
+    if (discount > 0) {
+      const discountAccountId = process.env.QBO_DISCOUNT_ACCOUNT_ID;
+      lines.push({
+        Amount: discount,
+        DetailType: "DiscountLineDetail",
+        Description: "Discount",
+        DiscountLineDetail: {
+          PercentBased: false,
+          ...(discountAccountId ? { DiscountAccountRef: { value: discountAccountId } } : {}),
         },
       });
     }
   } else {
-    const net = Math.max(0, Number(invoice.totalAmount || 0) - Number(invoice.discountAmount || 0));
+    const gross = Number(invoice.totalAmount || 0);
+    const discount = Number(invoice.discountAmount || 0);
+
     let programId = null;
     if (invoice.enrollment) {
       const enrollment = await Enrollment.findById(invoice.enrollment).select("program");
       programId = enrollment?.program;
     }
-    const itemId = await resolveItemId(programId);
-    lines.push({
-      Amount: net,
-      DetailType: "SalesItemLineDetail",
-      Description: invoice.description || `Invoice ${invoice.invoiceNumber}`,
-      SalesItemLineDetail: {
-        ItemRef: itemId ? { value: itemId } : undefined,
-        UnitPrice: net,
-        Qty: 1,
-      },
-    });
+    const itemId = await resolveItemId(programId, "program");
+
+    if (gross > 0) {
+      lines.push({
+        Amount: gross,
+        DetailType: "SalesItemLineDetail",
+        Description: invoice.description || `Invoice ${invoice.invoiceNumber}`,
+        SalesItemLineDetail: {
+          ItemRef: itemId ? { value: itemId } : undefined,
+          UnitPrice: gross,
+          Qty: 1,
+        },
+      });
+    }
+
+    if (discount > 0) {
+      lines.push({
+        Amount: discount,
+        DetailType: "DiscountLineDetail",
+        Description: "Discount",
+        DiscountLineDetail: { PercentBased: false, DiscountAccountRef: { value: process.env.QBO_DISCOUNT_ACCOUNT_ID } },
+      });
+    }
   }
 
   if (!lines.length) throw new Error("QBO: Cannot create invoice with zero lines");
   lines.forEach((l) => {
-    if (!l.SalesItemLineDetail.ItemRef) delete l.SalesItemLineDetail.ItemRef;
+    if (l.SalesItemLineDetail && !l.SalesItemLineDetail.ItemRef) {
+      delete l.SalesItemLineDetail.ItemRef;
+    }
   });
 
   const payload = {
@@ -879,6 +999,8 @@ async function syncInvoice(invoiceDoc, userDoc, options = {}) {
 
     const qboInvoice = await createQboInvoice({ invoice: invoiceDoc, user: userDoc, customerId }, options);
 
+    if (options.dryRun) return qboInvoice;
+
     if (options.dryRun) {
       console.log(`[QBO DRY RUN] Would set invoice.qboInvoiceId = ${qboInvoice.Id}`);
       return qboInvoice;
@@ -888,7 +1010,7 @@ async function syncInvoice(invoiceDoc, userDoc, options = {}) {
     invoiceDoc.qboSyncStatus = "synced";
     invoiceDoc.qboLastSyncedAt = new Date();
     invoiceDoc.qboSyncError = null;
-    await invoiceDoc.save();
+    await invoiceDoc.save(options.session ? { session: options.session } : undefined);
     return qboInvoice;
   } catch (err) {
     console.error("[QBO] syncInvoice REAL error:", err.message);
@@ -1043,6 +1165,7 @@ module.exports = {
   findOrCreateCustomer,
   syncCustomer,
   findOrCreateItem,
+  updateItemIncomeAccount,
   syncProgramItem,
   findInvoiceByDocNumber,
   createQboInvoice,

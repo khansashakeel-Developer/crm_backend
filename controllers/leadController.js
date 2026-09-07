@@ -1319,7 +1319,7 @@ exports.assignLead = async (req, res) => {
 //                 phone: lead.phone,
 //                 cnic: lead.contractDetails?.cnic || "",
 //                 address: lead.contractDetails?.currentAddress || "",
-//                 role: "user,
+//                 role: "user",
 //                 password: tempPassword,
 //             });
 //         }
@@ -1840,36 +1840,41 @@ exports.assignLead = async (req, res) => {
 //     }
 // };
 exports.convertLead = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const lead = await Lead.findById(req.params.id).populate("assigned_to", "name email");
-        if (!lead) return res.status(404).json({ success: false, message: "Lead not found" });
+        const lead = await Lead.findById(req.params.id).populate("assigned_to", "name email").session(session);
+        if (!lead) {
+            await session.abortTransaction();
+            return res.status(404).json({ success: false, message: "Lead not found" });
+        }
 
         if (!lead.paymentPlan) {
+            await session.abortTransaction();
             return res.status(400).json({
                 success: false,
                 message: "Please set a payment plan before converting.",
             });
         }
 
-        // ── batch_id aur program_id req.body se set karo ──────────
         if (req.body.batch_id) lead.batch_id = req.body.batch_id;
         if (req.body.program_id) lead.program_id = req.body.program_id;
 
-        // ── Step 1: Program + Batch fetch ─────────────────────────
-        const program = await Program.findById(lead.program_id).select("name");
+        const program = await Program.findById(lead.program_id).select("name").session(session);
         const batchDoc = lead.batch_id
-            ? await Batch.findById(lead.batch_id).select("name start_date end_date")
+            ? await Batch.findById(lead.batch_id).select("name start_date end_date").session(session)
             : null;
 
-        // ── Step 1.5: Already enrolled? (check BEFORE mutating lead) ──
-        const existingUser = await User.findOne({ email: lead.email });
+        const existingUser = await User.findOne({ email: lead.email }).session(session);
         if (existingUser) {
             const existingEnrollment = await Enrollment.findOne({
                 user: existingUser._id,
                 program: lead.program_id,
-            });
+            }).session(session);
 
             if (existingEnrollment) {
+                await session.abortTransaction();
                 return res.status(409).json({
                     success: false,
                     message: "User is already enrolled in this program.",
@@ -1878,11 +1883,9 @@ exports.convertLead = async (req, res) => {
             }
         }
 
-        // ── Step 2: Lead convert + save ───────────────────────────
         lead.status = "converted";
-        await lead.save();
+        await lead.save({ session });
 
-        // ── Step 3: User banao ────────────────────────────────────
         const crypto = require("crypto");
         const tempPassword = crypto.randomBytes(8).toString("hex");
         let user = existingUser;
@@ -1890,7 +1893,7 @@ exports.convertLead = async (req, res) => {
 
         if (!user) {
             isNewUser = true;
-            user = await User.create({
+            const userArr = await User.create([{
                 name: `${lead.first_name} ${lead.last_name}`,
                 email: lead.email,
                 phone: lead.phone,
@@ -1898,19 +1901,20 @@ exports.convertLead = async (req, res) => {
                 address: lead.contractDetails?.currentAddress || "",
                 role: "user",
                 password: tempPassword,
-            });
+            }], { session });
+            user = userArr[0];
         }
 
-        // ── Step 3.5: lead.user_id update karo ───────────────────
         lead.user_id = user._id;
-        await lead.save();
+        await lead.save({ session });
 
         const existingEnrollment = await Enrollment.findOne({
             user: user._id,
             program: lead.program_id,
-        });
+        }).session(session);
 
         if (existingEnrollment) {
+            await session.abortTransaction();
             return res.status(409).json({
                 success: false,
                 message: "User is already enrolled in this program.",
@@ -1918,8 +1922,7 @@ exports.convertLead = async (req, res) => {
             });
         }
 
-        // ── Step 4: Enrollment banao ──────────────────────────────
-        const enrollment = await Enrollment.create({
+        const enrollmentArr = await Enrollment.create([{
             user: user._id,
             program: lead.program_id,
             batch: lead.batch_id,
@@ -1927,45 +1930,24 @@ exports.convertLead = async (req, res) => {
             accessStatus: "RESTRICTED",
             assigned_to: lead.assigned_to,
             audioAccess: false,
-        });
+        }], { session });
+        const enrollment = enrollmentArr[0];
 
-        // ── Step 4.5: Batch count update karo ────────────────────
-        // ✅ SAHI — convertLead ke liye (koi transaction/session nahi hai is function mein)
         if (lead.batch_id) {
             await Batch.findOneAndUpdate(
                 { _id: lead.batch_id, students: { $ne: user._id } },
-                { $addToSet: { students: user._id }, $inc: { current_students: 1 } }
+                { $addToSet: { students: user._id }, $inc: { current_students: 1 } },
+                { session }
             );
         }
 
-        // ── Step 5: Invoice Number ────────────────────────────────
-        // const count = await Invoice.countDocuments();
-        // const paymentPlanIssueDate = lead.paymentPlan.issueDate ? new Date(lead.paymentPlan.issueDate) : new Date();
-        // // const invoiceNumber = `INV-${new Date().getFullYear()}-${String(count + 1).padStart(4, "0")}`;
-        // let invoiceNumber = lead.paymentPlan.invoiceNumber;
-        // if (!invoiceNumber) {
-        //     const count = await Invoice.countDocuments();
-        //     invoiceNumber = `INV-${new Date().getFullYear()}-${String(count + 1).padStart(4, "0")}`;
-        // }
-        // ── Step 5: Invoice Number ────────────────────────────────
         const paymentPlanIssueDate = lead.paymentPlan.issueDate ? new Date(lead.paymentPlan.issueDate) : new Date();
 
-        // PURANA (hatana hai):
-        // let invoiceNumber = lead.paymentPlan.invoiceNumber;
-        // if (invoiceNumber) {
-        //     const exists = await Invoice.findOne({ invoiceNumber });
-        //     if (exists) { return res.status(400)... }
-        // } else {
-        //     const count = await Invoice.countDocuments();
-        //     invoiceNumber = `INV-${new Date().getFullYear()}-${String(count + 1).padStart(4, "0")}`;
-        // }
-
-        // NAYA:
-        // NAYA
         let invoiceNumber = lead.paymentPlan.invoiceNumber;
         if (invoiceNumber) {
-            const taken = await invoiceNumberExists(invoiceNumber, lead._id);   // 👈 apna lead exclude karo
+            const taken = await invoiceNumberExists(invoiceNumber, lead._id);
             if (taken) {
+                await session.abortTransaction();
                 return res.status(400).json({
                     success: false,
                     message: `Invoice number ${invoiceNumber} already exists`,
@@ -1975,9 +1957,8 @@ exports.convertLead = async (req, res) => {
             invoiceNumber = await reserveNextInvoiceNumber();
         }
 
-        // ── Step 6: certFee seedha paymentPlan se — checkbox se frontend ne bheja hoga ──
         const {
-            totalAmount,                        // 👈 ye already program+cert+manual sab included hai (interested stage se)
+            totalAmount,
             advanceAmount,
             advanceDueDate,
             installments,
@@ -1987,6 +1968,7 @@ exports.convertLead = async (req, res) => {
         } = lead.paymentPlan;
 
         const programFee = totalAmount - certFee - manuFee;
+        const netPayable = totalAmount - discAmount;
 
         const allInstallments = [
             {
@@ -2031,7 +2013,7 @@ exports.convertLead = async (req, res) => {
             });
         }
 
-        const invoice = await Invoice.create({
+        const invoiceArr = await Invoice.create([{
             invoiceNumber,
             user: user._id,
             enrollment: enrollment._id,
@@ -2040,48 +2022,66 @@ exports.convertLead = async (req, res) => {
                 ...(certFee > 0 ? [{ program: lead.program_id, programName: `${program.name} — Certificate Fee`, enrollment: enrollment._id, amount: certFee, feeType: "certificate" }] : []),
                 ...(manuFee > 0 ? [{ program: lead.program_id, programName: `${program.name} — Manual Fee`, enrollment: enrollment._id, amount: manuFee, feeType: "manual" }] : []),
             ],
-            totalAmount: totalAmount + discAmount,     // 👈 ab gross ban gaya
-            discountAmount: discAmount,                // 👈 naya
-            remainingAmount: totalAmount,               // net hi remaining rahega (discount already minus)
+            totalAmount: totalAmount,
+            discountAmount: discAmount,
+            remainingAmount: netPayable,
             paidAmount: 0,
             dueDate: advanceDueDate,
             issueDate: paymentPlanIssueDate,
             installments: allInstallments,
             notes: lead.paymentPlan.notes || "",
             status: "PENDING",
+        }], { session });
+        const invoice = invoiceArr[0];
+
+        await postInvoiceJournal({
+            amount: totalAmount,
+            discountAmount: discAmount,
+            invoiceId: invoice._id,
+            userId: req.user._id,
+            description: `Invoice ${invoiceNumber} — Lead converted`,
+            date: paymentPlanIssueDate,
+            session,
         });
 
-        // ✅ ADD THIS
+        // ✅ BLOCKING QBO SYNC — agar fail ho, poora transaction abort
         try {
-            await postInvoiceJournal({
-                amount: totalAmount + discAmount,     // gross
-                discountAmount: discAmount,           // 👈 naya
-                invoiceId: invoice._id,
-                userId: req.user._id,
-                description: `Invoice ${invoiceNumber} — Lead converted`,
-                date: paymentPlanIssueDate,
+            const qbo = require("../services/qboService");
+            await qbo.syncInvoice(invoice, user, { session });
+        } catch (qboErr) {
+            await session.abortTransaction();
+            console.error("[QBO] convertLead blocking sync failed:", qboErr.message);
+            return res.status(502).json({
+                success: false,
+                message: `QuickBooks sync failed — lead conversion cancelled, no changes were made: ${qboErr.message}`,
             });
-        } catch (journalErr) {
-            console.error("postInvoiceJournal failed:", journalErr.message);
         }
 
-        qboHooks.afterInvoiceCreated(invoice._id, user._id);
-
         lead.invoiceNumber = invoiceNumber;
-        await lead.save();
+        await lead.save({ session });
 
-        // ── Step 7: Enrollment pe invoice link ───────────────────
-        await Enrollment.findByIdAndUpdate(enrollment._id, { invoice: invoice._id });
+        await Enrollment.findByIdAndUpdate(enrollment._id, { invoice: invoice._id }, { session });
 
-        // ── Step 8: Email helpers ─────────────────────────────────
+        await logAudit({
+            req,
+            action: "LEAD_CONVERTED",
+            module: "leads",
+            targetId: lead._id,
+            after: {
+                enrollment: enrollment._id,
+                invoice: invoice._id,
+                user: user._id,
+                batch_id: lead.batch_id,
+            },
+        });
+
+        await session.commitTransaction();
+
+        // ── Emails — commit ke BAAD, agar ye fail ho to lead conversion pehle hi ho chuka hai ──
         const formatDate = (d) =>
-            d ? new Date(d).toLocaleDateString("en-PK", {
-                day: "2-digit", month: "short", year: "numeric",
-            }) : "—";
-
+            d ? new Date(d).toLocaleDateString("en-PK", { day: "2-digit", month: "short", year: "numeric" }) : "—";
         const formatAmount = (n) => Number(n || 0).toLocaleString("en-PK");
 
-        // ── Step 9: Installment rows HTML ──────────────────────────
         const installmentRows = invoice.installments.map((inst, i) => {
             const isAdv = inst.isAdvance;
             const isPaid = inst.status === "PAID";
@@ -2094,12 +2094,8 @@ exports.convertLead = async (req, res) => {
           <span style="font-weight:700;">${isAdv ? "Advance Payment" : inst.label || `Installment ${i + 1}`}</span>
           ${isAdv ? `<span style="display:inline-block; background:#c8a84b; color:#5a3a00; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; padding:2px 8px; border-radius:4px; margin-left:7px;">Advance</span>` : ""}
         </td>
-        <td style="padding:13px 14px; text-align:center; font-family:'Courier New',monospace; font-size:12px; color:#4a5060; width:50px;">
-          1
-        </td>
-        <td style="padding:13px 14px; font-family:'Courier New',monospace; font-size:11.5px; color:#4a5060;">
-          ${formatDate(inst.dueDate)}
-        </td>
+        <td style="padding:13px 14px; text-align:center; font-family:'Courier New',monospace; font-size:12px; color:#4a5060; width:50px;">1</td>
+        <td style="padding:13px 14px; font-family:'Courier New',monospace; font-size:11.5px; color:#4a5060;">${formatDate(inst.dueDate)}</td>
         <td style="padding:13px 14px;">
           <span style="display:inline-block; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; padding:3px 9px; border-radius:5px;
             background:${isPaid ? "#eafaf3" : "#fff8e8"}; color:${isPaid ? "#1a8a57" : "#b07800"};">
@@ -2113,76 +2109,76 @@ exports.convertLead = async (req, res) => {
         }).join("");
 
         // ── Step 10: Invoice Email ────────────────────────────────
-        try {
-            await sendEmailDynamic({
-                to: user.email,
-                subject: `Your Enrollment Invoice ${invoice.invoiceNumber} | ALCO`,
-                templateName: "generate-invoice",
-                replacements: {
-                    // ── Invoice meta ──────────────────────────────
-                    invoiceNumber: invoice.invoiceNumber,
-                    invoiceStatus: invoice.status,
-                    issueDate: formatDate(new Date()),
-                    advanceDueDate: formatDate(invoice.dueDate),
-                    enrollmentId: enrollment._id.toString().slice(0, 8) + "..." + enrollment._id.toString().slice(-4),
+        // try {
+        //     await sendEmailDynamic({
+        //         to: user.email,
+        //         subject: `Your Enrollment Invoice ${invoice.invoiceNumber} | ALCO`,
+        //         templateName: "generate-invoice",
+        //         replacements: {
+        //             // ── Invoice meta ──────────────────────────────
+        //             invoiceNumber: invoice.invoiceNumber,
+        //             invoiceStatus: invoice.status,
+        //             issueDate: formatDate(new Date()),
+        //             advanceDueDate: formatDate(invoice.dueDate),
+        //             enrollmentId: enrollment._id.toString().slice(0, 8) + "..." + enrollment._id.toString().slice(-4),
 
-                    // ── Batch ─────────────────────────────────────
-                    batchName: batchDoc?.name || "—",
-                    batchStartDate: formatDate(batchDoc?.start_date) || "—",
-                    batchEndDate: formatDate(batchDoc?.end_date) || "—",
+        //             // ── Batch ─────────────────────────────────────
+        //             batchName: batchDoc?.name || "—",
+        //             batchStartDate: formatDate(batchDoc?.start_date) || "—",
+        //             batchEndDate: formatDate(batchDoc?.end_date) || "—",
 
-                    // ── Student ───────────────────────────────────
-                    studentName: user.name,
-                    studentEmail: user.email,
-                    studentPhone: user.phone || "—",
-                    studentCnic: lead.contractDetails?.cnic || "—",
-                    studentAddress: lead.contractDetails?.currentAddress || "—",
-                    studentProfession: lead.profession || lead.contractDetails?.occupation || "—",
+        //             // ── Student ───────────────────────────────────
+        //             studentName: user.name,
+        //             studentEmail: user.email,
+        //             studentPhone: user.phone || "—",
+        //             studentCnic: lead.contractDetails?.cnic || "—",
+        //             studentAddress: lead.contractDetails?.currentAddress || "—",
+        //             studentProfession: lead.profession || lead.contractDetails?.occupation || "—",
 
-                    // ── Sales ─────────────────────────────────────
-                    salesManagerName: lead.assigned_to?.name || "Sales Team",
-                    salesManagerEmail: lead.assigned_to?.email || "sales@alco.com",
+        //             // ── Sales ─────────────────────────────────────
+        //             salesManagerName: lead.assigned_to?.name || "Sales Team",
+        //             salesManagerEmail: lead.assigned_to?.email || "sales@alco.com",
 
-                    // ── Program ───────────────────────────────────
-                    programName: program?.name || "NLP Program",
-                    planNotesBlock: lead.paymentPlan?.notes
-                        ? `<div style="font-size:12px;color:#4a5060;font-style:italic;padding:10px 14px;
-                             background:#ffffff;border-radius:8px;border-left:3px solid #c8a84b;">
-                             ${lead.paymentPlan.notes}
-                           </div>`
-                        : "",
+        //             // ── Program ───────────────────────────────────
+        //             programName: program?.name || "NLP Program",
+        //             planNotesBlock: lead.paymentPlan?.notes
+        //                 ? `<div style="font-size:12px;color:#4a5060;font-style:italic;padding:10px 14px;
+        //                      background:#ffffff;border-radius:8px;border-left:3px solid #c8a84b;">
+        //                      ${lead.paymentPlan.notes}
+        //                    </div>`
+        //                 : "",
 
-                    // ── Installments ──────────────────────────────
-                    installmentRows,
+        //             // ── Installments ──────────────────────────────
+        //             installmentRows,
 
-                    // ── Totals ────────────────────────────────────
-                    totalAmount: formatAmount(invoice.totalAmount),
-                    paidAmount: formatAmount(invoice.paidAmount || 0),
-                    remainingAmount: formatAmount(invoice.remainingAmount || invoice.totalAmount),
-                    advanceAmount: formatAmount(invoice.installments.find((i) => i.isAdvance)?.amount || 0),
-                },
-            });
-        } catch (emailErr) {
-            console.error("Invoice email failed:", emailErr.message);
-        }
+        //             // ── Totals ────────────────────────────────────
+        //             totalAmount: formatAmount(invoice.totalAmount),
+        //             paidAmount: formatAmount(invoice.paidAmount || 0),
+        //             remainingAmount: formatAmount(invoice.remainingAmount || invoice.totalAmount),
+        //             advanceAmount: formatAmount(invoice.installments.find((i) => i.isAdvance)?.amount || 0),
+        //         },
+        //     });
+        // } catch (emailErr) {
+        //     console.error("Invoice email failed:", emailErr.message);
+        // }
 
         // ── Step 11: Credentials Email (new user only) ────────────
-        if (isNewUser) {
-            try {
-                await sendEmailDynamic({
-                    to: user.email,
-                    subject: "Your Login Credentials | ALCO",
-                    templateName: "send-user-credentials",
-                    replacements: {
-                        userName: user.name,
-                        userEmail: user.email,
-                        password: tempPassword,
-                    },
-                });
-            } catch (credErr) {
-                console.error("Credentials email failed:", credErr.message);
-            }
-        }
+        // if (isNewUser) {
+        //     try {
+        //         await sendEmailDynamic({
+        //             to: user.email,
+        //             subject: "Your Login Credentials | ALCO",
+        //             templateName: "send-user-credentials",
+        //             replacements: {
+        //                 userName: user.name,
+        //                 userEmail: user.email,
+        //                 password: tempPassword,
+        //             },
+        //         });
+        //     } catch (credErr) {
+        //         console.error("Credentials email failed:", credErr.message);
+        //     }
+        // }
 
         // ── Step 12: Audit Log ────────────────────────────────────
         await logAudit({
@@ -2228,8 +2224,11 @@ exports.convertLead = async (req, res) => {
         });
 
     } catch (err) {
+        await session.abortTransaction();
         console.error("convertLead error:", err.message);
         res.status(500).json({ success: false, message: err.message });
+    } finally {
+        session.endSession();
     }
 };
 
@@ -2842,16 +2841,20 @@ exports.markInterested = async (req, res) => {
             status: lead.contractDetails?.status || "pending",
         };
 
-        // Payment plan agar bheja hai to save karo
         if (req.body.paymentPlan) {
-            const { invoiceNumber, issueDate, certificateFee = 0, manualFee = 0, discount = 0, ...rest } = req.body.paymentPlan;
+            // ✅ default value hata do taake "nahi bheja" vs "0 bheja" mein farak reh sake
+            const { invoiceNumber, issueDate, certificateFee, manualFee, discount = 0, ...rest } = req.body.paymentPlan;
+
+            // ✅ sahi path se resolve karo, aur ek hi jagah calculate karo
+            const resolvedCertFee = certificateFee ?? lead.paymentPlan?.certificateFee ?? 0;
+            const resolvedManualFee = manualFee ?? lead.paymentPlan?.manualFee ?? 0;
 
             lead.paymentPlan = {
                 ...rest,
-                certificateFee,
-                manualFee,
+                certificateFee: resolvedCertFee,
+                manualFee: resolvedManualFee,
                 discountAmount: discount,
-                totalAmount: (rest.totalAmount || 0) + certificateFee + manualFee,
+                totalAmount: (rest.totalAmount || 0) + resolvedCertFee + resolvedManualFee,
                 invoiceNumber: invoiceNumber || undefined,
                 issueDate: issueDate ? new Date(issueDate) : new Date(),
                 createdBy: req.user._id,
@@ -3220,19 +3223,23 @@ exports.updatePaymentPlan = async (req, res) => {
 
         const { invoiceNumber, issueDate, certificateFee = 0, manualFee = 0, discount = 0, ...rest } = req.body;
 
+        const existingCertFee = lead.paymentPlan?.certificateFee || 0;
+        const existingManualFee = lead.paymentPlan?.manualFee || 0;
+
+        const resolvedCertFee = existingCertFee > 0 ? existingCertFee : (certificateFee ?? 0);
+        const resolvedManualFee = existingManualFee > 0 ? existingManualFee : (manualFee ?? 0);
+
         lead.paymentPlan = {
             ...rest,
-            certificateFee,
-            manualFee,
+            certificateFee: resolvedCertFee,
+            manualFee: resolvedManualFee,
             discountAmount: discount,
-            totalAmount: (rest.totalAmount || 0) + certificateFee + manualFee,
+            totalAmount: (rest.totalAmount || 0) + resolvedCertFee + resolvedManualFee,
             invoiceNumber: invoiceNumber || lead.paymentPlan?.invoiceNumber || undefined,
             issueDate: issueDate ? new Date(issueDate) : (lead.paymentPlan?.issueDate || new Date()),
             createdBy: req.user._id,
             createdAt: new Date(),
         };
-
-        await lead.save();
 
         await lead.save();
 

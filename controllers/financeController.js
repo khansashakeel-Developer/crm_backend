@@ -20,6 +20,7 @@ const JournalEntry = require("../models/journalEntryModel.js");
 const reverseJournalEntry = require("../utils/reverseJournalEntry.js");
 const { invoiceNumberExists, reserveNextInvoiceNumber } = require("../utils/invoiceNumber.js");
 const generateReceivingInvoiceTemplate = require("../template/generate-receiving-invoice.js");
+const qboHooks = require("../utils/qboHooks");
 
 function getNetAmount(invoice) {
   return Math.max(0, (invoice.totalAmount || 0) - (invoice.discountAmount || 0));

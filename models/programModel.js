@@ -87,12 +87,15 @@ const programSchema = new mongoose.Schema(
                 order: { type: Number, default: 0 },
             },
         ],
+        qboIncomeAccountId: { type: String, default: null },
         qboItemId: { type: String, default: null, index: true },
         qboSyncStatus: {
             type: String,
             enum: ["pending", "synced", "failed"],
             default: "pending",
         },
+        qboCertificateItemId: { type: String, default: null },
+        qboManualItemId: { type: String, default: null },
     },
     { timestamps: true }
 );
