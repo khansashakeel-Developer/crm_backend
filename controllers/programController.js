@@ -9,6 +9,114 @@ const Enrollment = require("../models/enrollmentModel");
 const Invoice = require("../models/invoiceModel");
 const ExcelJS = require("exceljs"); // For Excel export-Khansa
 
+// ── Shared export helpers ──────────────────────────────────
+const formatDateRange = (start, end) => {
+    if (!start && !end) return "";
+    const opts = { day: "numeric", month: "short" };
+    const s = start ? new Date(start) : null;
+    const e = end ? new Date(end) : null;
+    const year = e ? e.getFullYear() : s ? s.getFullYear() : "";
+    const sStr = s ? s.toLocaleDateString("en-GB", opts) : "";
+    const eStr = e ? e.toLocaleDateString("en-GB", opts) : "";
+    return `${sStr} - ${eStr} ${year}`.trim();
+};
+
+const money = (n) => (n === "" || n === null || n === undefined ? "" : `Rs. ${Number(n).toFixed(2)}`);
+const dateStr = (d) => (d ? new Date(d).toLocaleDateString("en-GB") : "");
+
+async function buildBatchExportData(batch) {
+    const enrollments = await Enrollment.find({ batch: batch._id }).select("_id user");
+    const enrollmentByUser = new Map(enrollments.map((e) => [e.user.toString(), e._id.toString()]));
+    const enrollmentIds = enrollments.map((e) => e._id);
+
+    const invoices = await Invoice.find({
+        enrollment: { $in: enrollmentIds },
+        status: { $ne: "CANCELLED" },
+    }).select("totalAmount paidAmount remainingAmount issueDate installments enrollment");
+
+    const invoiceByEnrollment = new Map(invoices.map((inv) => [inv.enrollment.toString(), inv]));
+
+    let maxInstallments = 0;
+    for (const inv of invoices) {
+        const regularCount = (inv.installments || []).filter((i) => !i.isAdvance).length;
+        if (regularCount > maxInstallments) maxInstallments = regularCount;
+    }
+
+    const programName = batch.program_id?.name || "";
+    const dateRangeText = formatDateRange(batch.start_date, batch.end_date);
+
+    const studentRows = (batch.students || []).map((student) => {
+        const enrollmentId = enrollmentByUser.get(student._id.toString());
+        const invoice = enrollmentId ? invoiceByEnrollment.get(enrollmentId) : null;
+
+        const row = {
+            name: student.name,
+            totalAmount: 0,
+            paidAmount: 0,
+            issueDate: "",
+            installmentPlan: 0,
+            advance: { date: "", amount: "" },
+            installments: [],
+            pending: 0,
+        };
+
+        if (invoice) {
+            row.totalAmount = invoice.totalAmount || 0;
+            row.paidAmount = invoice.paidAmount || 0;
+            row.issueDate = invoice.issueDate || "";
+
+            const regularInstallments = (invoice.installments || []).filter((i) => !i.isAdvance);
+            row.installmentPlan = regularInstallments.length;
+
+            const advance = (invoice.installments || []).find((i) => i.isAdvance);
+            row.advance = { date: advance?.paidAt || "", amount: advance?.paidAmount || "" };
+
+            for (let n = 0; n < maxInstallments; n++) {
+                const inst = regularInstallments[n];
+                row.installments.push({ date: inst?.paidAt || "", amount: inst?.paidAmount || "" });
+            }
+
+            row.pending = invoice.remainingAmount || 0;
+        } else {
+            for (let n = 0; n < maxInstallments; n++) {
+                row.installments.push({ date: "", amount: "" });
+            }
+        }
+
+        return row;
+    });
+
+    const totals = studentRows.reduce(
+        (acc, r) => {
+            acc.totalAmount += Number(r.totalAmount || 0);
+            acc.paidAmount += Number(r.paidAmount || 0);
+            acc.pending += Number(r.pending || 0);
+            return acc;
+        },
+        { totalAmount: 0, paidAmount: 0, pending: 0 }
+    );
+
+    return { batch, programName, dateRangeText, maxInstallments, studentRows, totals };
+}
+
+async function launchBrowser() {
+    const isVercel = !!process.env.VERCEL;
+    if (isVercel) {
+        const chromium = (await import("@sparticuz/chromium")).default;
+        const puppeteerCore = (await import("puppeteer-core")).default;
+        return puppeteerCore.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
+        });
+    }
+    const puppeteer = (await import("puppeteer")).default;
+    return puppeteer.launch({
+        headless: "new",
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+}
 // ═══════════════════════════════════════
 // PUBLIC ENDPOINTS
 // ═══════════════════════════════════════
@@ -949,116 +1057,25 @@ exports.adminGetBatchById = async (req, res) => {
 };
 
 // GET /admin/v1/batches/:id/export
+// GET /admin/v1/batches/:id/export
 exports.adminExportBatchPayments = async (req, res) => {
     try {
         const format = (req.query.format || "xlsx").toLowerCase();
 
-        const batch = await Batch.findById(req.params.id)
+        const batchDoc = await Batch.findById(req.params.id)
             .populate("program_id", "name slug")
             .populate("students", "name email phone");
 
-        if (!batch) {
+        if (!batchDoc) {
             return res.status(404).json({ success: false, message: "Batch not found" });
         }
 
-        const enrollments = await Enrollment.find({ batch: batch._id }).select("_id user");
-        const enrollmentByUser = new Map(
-            enrollments.map((e) => [e.user.toString(), e._id.toString()])
-        );
-        const enrollmentIds = enrollments.map((e) => e._id);
-
-        const invoices = await Invoice.find({
-            enrollment: { $in: enrollmentIds },
-            status: { $ne: "CANCELLED" },
-        }).select("totalAmount paidAmount remainingAmount issueDate installments enrollment");
-
-        const invoiceByEnrollment = new Map(
-            invoices.map((inv) => [inv.enrollment.toString(), inv])
-        );
-
-        // Highest number of regular (non advance) installments across the whole batch
-        let maxInstallments = 0;
-        for (const inv of invoices) {
-            const regularCount = (inv.installments || []).filter((i) => !i.isAdvance).length;
-            if (regularCount > maxInstallments) maxInstallments = regularCount;
-        }
-
-        // ── Format date range for the title (e.g. "6 Aug - 18 Aug 2026") ──
-        const formatDateRange = (start, end) => {
-            if (!start && !end) return "";
-            const opts = { day: "numeric", month: "short" };
-            const s = start ? new Date(start) : null;
-            const e = end ? new Date(end) : null;
-            const year = e ? e.getFullYear() : s ? s.getFullYear() : "";
-            const sStr = s ? s.toLocaleDateString("en-GB", opts) : "";
-            const eStr = e ? e.toLocaleDateString("en-GB", opts) : "";
-            return `${sStr} - ${eStr} ${year}`.trim();
-        };
-
-        const programName = batch.program_id?.name || "";
-        const dateRangeText = formatDateRange(batch.start_date, batch.end_date);
-
-        // ── Build each student's row data (shared by all formats) ──
-        const studentRows = batch.students.map((student) => {
-            const enrollmentId = enrollmentByUser.get(student._id.toString());
-            const invoice = enrollmentId ? invoiceByEnrollment.get(enrollmentId) : null;
-
-            const row = {
-                name: student.name,
-                totalAmount: 0,
-                paidAmount: 0,
-                issueDate: "",
-                installmentPlan: 0,
-                advance: { date: "", amount: "" },
-                installments: [],
-                pending: 0,
-            };
-
-            if (invoice) {
-                row.totalAmount = invoice.totalAmount || 0;
-                row.paidAmount = invoice.paidAmount || 0;
-                row.issueDate = invoice.issueDate || "";
-
-                const regularInstallments = (invoice.installments || []).filter((i) => !i.isAdvance);
-                row.installmentPlan = regularInstallments.length;
-
-                const advance = (invoice.installments || []).find((i) => i.isAdvance);
-                row.advance = { date: advance?.paidAt || "", amount: advance?.paidAmount || "" };
-
-                for (let n = 0; n < maxInstallments; n++) {
-                    const inst = regularInstallments[n];
-                    row.installments.push({ date: inst?.paidAt || "", amount: inst?.paidAmount || "" });
-                }
-
-                row.pending = invoice.remainingAmount || 0;
-            } else {
-                for (let n = 0; n < maxInstallments; n++) {
-                    row.installments.push({ date: "", amount: "" });
-                }
-            }
-
-            return row;
-        });
-
-        const totals = studentRows.reduce(
-            (acc, r) => {
-                acc.totalAmount += Number(r.totalAmount || 0);
-                acc.paidAmount += Number(r.paidAmount || 0);
-                acc.pending += Number(r.pending || 0);
-                return acc;
-            },
-            { totalAmount: 0, paidAmount: 0, pending: 0 }
-        );
+        const { batch, programName, dateRangeText, maxInstallments, studentRows, totals } =
+            await buildBatchExportData(batchDoc);
 
         const filenameBase = batch.name.replace(/[^a-z0-9]+/gi, "-");
 
-        // ── Shared formatting helpers ──
-        const money = (n) => (n === "" || n === null || n === undefined ? "" : `Rs. ${Number(n).toFixed(2)}`);
-        const dateStr = (d) => (d ? new Date(d).toLocaleDateString("en-GB") : "");
-
-        // ═══════════════════════════════════════
-        // CSV
-        // ═══════════════════════════════════════
+        // ═══ CSV ═══
         if (format === "csv") {
             const esc = (val) => {
                 const str = val === null || val === undefined ? "" : String(val);
@@ -1079,17 +1096,10 @@ exports.adminExportBatchPayments = async (req, res) => {
 
             for (const row of studentRows) {
                 const cols = [
-                    row.name,
-                    money(row.totalAmount),
-                    money(row.paidAmount),
-                    dateStr(row.issueDate),
-                    row.installmentPlan,
-                    dateStr(row.advance.date),
-                    money(row.advance.amount),
+                    row.name, money(row.totalAmount), money(row.paidAmount), dateStr(row.issueDate),
+                    row.installmentPlan, dateStr(row.advance.date), money(row.advance.amount),
                 ];
-                for (const inst of row.installments) {
-                    cols.push(dateStr(inst.date), money(inst.amount));
-                }
+                for (const inst of row.installments) cols.push(dateStr(inst.date), money(inst.amount));
                 cols.push(money(row.pending));
                 lines.push(cols.map(esc).join(","));
             }
@@ -1105,30 +1115,26 @@ exports.adminExportBatchPayments = async (req, res) => {
             return res.send(lines.join("\n"));
         }
 
-        // ═══════════════════════════════════════
-        // PDF
-        // ═══════════════════════════════════════
+        // ═══ PDF ═══
         if (format === "pdf") {
             const nameColWidth = 140;
             const otherColWidth = 78;
-            const numDataCols = 4 + (maxInstallments + 1) * 2 + 1; // total, received, date, plan + (advance+installments)*2 + pending
-            const totalWidthPx = nameColWidth + numDataCols * otherColWidth + 40; // + padding buffer
+            const numDataCols = 4 + (maxInstallments + 1) * 2 + 1;
+            const totalWidthPx = nameColWidth + numDataCols * otherColWidth + 40;
             const widthIn = (totalWidthPx / 96).toFixed(2);
 
             let theadTop = `<th rowspan="2">Full Name</th><th rowspan="2">Total Amount</th><th rowspan="2">Total received</th><th rowspan="2">Invoice date</th><th rowspan="2">Installment plan</th><th colspan="2">Advance Payment</th>`;
-            let theadBottomAdvance = `<th>Date of receipt</th><th>Amount</th>`;
+            let theadBottom = `<th>Date of receipt</th><th>Amount</th>`;
             for (let n = 1; n <= maxInstallments; n++) {
                 theadTop += `<th colspan="2">Installment ${n}</th>`;
-                theadBottomAdvance += `<th>Date of receipt</th><th>Amount</th>`;
+                theadBottom += `<th>Date of receipt</th><th>Amount</th>`;
             }
             theadTop += `<th rowspan="2">Pending</th>`;
 
             let bodyRows = "";
             for (const r of studentRows) {
                 let cells = `<td class="name">${r.name}</td><td>${money(r.totalAmount)}</td><td>${money(r.paidAmount)}</td><td>${dateStr(r.issueDate)}</td><td>${r.installmentPlan}</td><td>${dateStr(r.advance.date)}</td><td>${money(r.advance.amount)}</td>`;
-                for (const inst of r.installments) {
-                    cells += `<td>${dateStr(inst.date)}</td><td>${money(inst.amount)}</td>`;
-                }
+                for (const inst of r.installments) cells += `<td>${dateStr(inst.date)}</td><td>${money(inst.amount)}</td>`;
                 cells += `<td>${money(r.pending)}</td>`;
                 bodyRows += `<tr>${cells}</tr>`;
             }
@@ -1138,11 +1144,7 @@ exports.adminExportBatchPayments = async (req, res) => {
             totalCells += `<td>${money(totals.pending)}</td>`;
 
             const html = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                <meta charset="utf-8" />
-                <style>
+                <!DOCTYPE html><html><head><meta charset="utf-8" /><style>
                     * { box-sizing: border-box; }
                     body { font-family: Arial, Helvetica, sans-serif; margin: 20px; }
                     h1 { font-size: 16px; margin: 0 0 2px 0; }
@@ -1152,49 +1154,21 @@ exports.adminExportBatchPayments = async (req, res) => {
                     th { background: #f3f3f3; font-weight: bold; }
                     td.name { text-align: left; font-weight: 500; }
                     tfoot td { font-weight: bold; background: #fafafa; }
-                </style>
-                </head>
-                <body>
-                    <h1>${programName}</h1>
-                    <h2>${dateRangeText}</h2>
-                    <table>
-                        <thead>
-                            <tr>${theadTop}</tr>
-                            <tr>${theadBottomAdvance}</tr>
-                        </thead>
-                        <tbody>${bodyRows}</tbody>
-                        <tfoot><tr>${totalCells}</tr></tfoot>
-                    </table>
-                </body>
-                </html>
+                </style></head><body>
+                    <h1>${programName}</h1><h2>${dateRangeText}</h2>
+                    <table><thead><tr>${theadTop}</tr><tr>${theadBottom}</tr></thead>
+                    <tbody>${bodyRows}</tbody><tfoot><tr>${totalCells}</tr></tfoot></table>
+                </body></html>
             `;
 
-            const isVercel = !!process.env.VERCEL;
-
-            let browser;
-            if (isVercel) {
-                const chromium = (await import("@sparticuz/chromium")).default;
-                const puppeteerCore = (await import("puppeteer-core")).default;
-                browser = await puppeteerCore.launch({
-                    args: chromium.args,
-                    defaultViewport: chromium.defaultViewport,
-                    executablePath: await chromium.executablePath(),
-                    headless: chromium.headless,
-                });
-            } else {
-                const puppeteer = (await import("puppeteer")).default;
-                browser = await puppeteer.launch({
-                    headless: "new",
-                    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-                });
-            }
+            const browser = await launchBrowser();
             const page = await browser.newPage();
             await page.setContent(html, { waitUntil: "networkidle0" });
 
             const bodyHeight = await page.evaluate(() => document.body.scrollHeight);
             const heightIn = ((bodyHeight + 40) / 96).toFixed(2);
 
-                        const pdfUint8Array = await page.pdf({
+            const pdfUint8Array = await page.pdf({
                 width: `${widthIn}in`,
                 height: `${heightIn}in`,
                 printBackground: true,
@@ -1202,7 +1176,6 @@ exports.adminExportBatchPayments = async (req, res) => {
             });
 
             await browser.close();
-
             const pdfBuffer = Buffer.from(pdfUint8Array);
 
             res.setHeader("Content-Type", "application/pdf");
@@ -1211,12 +1184,9 @@ exports.adminExportBatchPayments = async (req, res) => {
             return res.end(pdfBuffer);
         }
 
-        // ═══════════════════════════════════════
-        // XLSX (default)
-        // ═══════════════════════════════════════
+        // ═══ XLSX (default) ═══
         const workbook = new ExcelJS.Workbook();
         const sheet = workbook.addWorksheet("Batch Payments");
-
         const totalCols = 5 + (maxInstallments + 1) * 2 + 1;
 
         sheet.getCell(1, 1).value = programName;
@@ -1228,7 +1198,6 @@ exports.adminExportBatchPayments = async (req, res) => {
 
         const headerRowIndex = 3;
         const subHeaderRowIndex = 4;
-
         const row1 = ["Full Name", "Total Amount", "Total received", "Invoice date", "Installment plan", "Advance Payment", ""];
         const row2 = ["", "", "", "", "", "Date of receipt", "Amount"];
         for (let n = 1; n <= maxInstallments; n++) {
@@ -1240,7 +1209,6 @@ exports.adminExportBatchPayments = async (req, res) => {
 
         sheet.getRow(headerRowIndex).values = row1;
         sheet.getRow(subHeaderRowIndex).values = row2;
-
         sheet.mergeCells(headerRowIndex, 1, subHeaderRowIndex, 1);
         sheet.mergeCells(headerRowIndex, 2, subHeaderRowIndex, 2);
         sheet.mergeCells(headerRowIndex, 3, subHeaderRowIndex, 3);
@@ -1252,24 +1220,19 @@ exports.adminExportBatchPayments = async (req, res) => {
             col += 2;
         }
         sheet.mergeCells(headerRowIndex, totalCols, subHeaderRowIndex, totalCols);
-
         sheet.getRow(headerRowIndex).font = { bold: true };
         sheet.getRow(subHeaderRowIndex).font = { bold: true };
 
         const currencyFmt = '"Rs. "#,##0.00';
         const dateFmt = "dd/mm/yyyy";
-
         let currentRow = subHeaderRowIndex + 1;
         for (const r of studentRows) {
             const rowData = [r.name, r.totalAmount, r.paidAmount, r.issueDate, r.installmentPlan, r.advance.date, r.advance.amount];
-            for (const inst of r.installments) {
-                rowData.push(inst.date, inst.amount);
-            }
+            for (const inst of r.installments) rowData.push(inst.date, inst.amount);
             rowData.push(r.pending);
 
             const excelRow = sheet.getRow(currentRow);
             excelRow.values = rowData;
-
             excelRow.getCell(2).numFmt = currencyFmt;
             excelRow.getCell(3).numFmt = currencyFmt;
             excelRow.getCell(4).numFmt = dateFmt;
@@ -1280,7 +1243,6 @@ exports.adminExportBatchPayments = async (req, res) => {
                 c += 2;
             }
             excelRow.getCell(totalCols).numFmt = currencyFmt;
-
             currentRow++;
         }
 
@@ -1298,16 +1260,10 @@ exports.adminExportBatchPayments = async (req, res) => {
         totalRow.getCell(totalCols).numFmt = currencyFmt;
         totalRow.getCell(totalCols).font = { bold: true };
 
-        sheet.columns.forEach((column) => {
-            column.width = 18;
-        });
+        sheet.columns.forEach((column) => { column.width = 18; });
 
-        res.setHeader(
-            "Content-Type",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}-payments.xlsx"`);
-
         await workbook.xlsx.write(res);
         res.end();
     } catch (error) {
@@ -1315,6 +1271,266 @@ exports.adminExportBatchPayments = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+// GET /admin/v1/batches/export-all
+exports.adminExportAllBatchesPayments = async (req, res) => {
+    try {
+        const format = (req.query.format || "xlsx").toLowerCase();
+        const { status, program_id, search } = req.query;
+
+        const query = {};
+        if (program_id) query.program_id = new mongoose.Types.ObjectId(program_id);
+        if (status) query.status = status;
+        if (search) query.name = { $regex: search, $options: "i" };
+
+        const batches = await Batch.find(query)
+            .populate("program_id", "name slug")
+            .populate("students", "name email phone")
+            .sort({ createdAt: 1 });
+
+        if (batches.length === 0) {
+            return res.status(404).json({ success: false, message: "No batches found for the given filters" });
+        }
+
+        const allData = [];
+        for (const batch of batches) {
+            allData.push(await buildBatchExportData(batch));
+        }
+
+        const filenameBase = `all-batches-payments-${Date.now()}`;
+
+        // ═══ CSV ═══
+        if (format === "csv") {
+            const esc = (val) => {
+                const str = val === null || val === undefined ? "" : String(val);
+                return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+            };
+
+            const lines = [];
+            for (const data of allData) {
+                const { batch, programName, dateRangeText, maxInstallments, studentRows, totals } = data;
+
+                lines.push(esc(batch.name));
+                lines.push([esc(programName), esc(dateRangeText)].join(","));
+
+                const headerCols = ["Full Name", "Total Amount", "Total received", "Invoice date", "Installment plan"];
+                headerCols.push("Advance Payment - Date of receipt", "Advance Payment - Amount");
+                for (let n = 1; n <= maxInstallments; n++) {
+                    headerCols.push(`Installment ${n} - Date of receipt`, `Installment ${n} - Amount`);
+                }
+                headerCols.push("Pending");
+                lines.push(headerCols.map(esc).join(","));
+
+                for (const row of studentRows) {
+                    const cols = [
+                        row.name, money(row.totalAmount), money(row.paidAmount), dateStr(row.issueDate),
+                        row.installmentPlan, dateStr(row.advance.date), money(row.advance.amount),
+                    ];
+                    for (const inst of row.installments) cols.push(dateStr(inst.date), money(inst.amount));
+                    cols.push(money(row.pending));
+                    lines.push(cols.map(esc).join(","));
+                }
+
+                const totalRow = ["Total", money(totals.totalAmount), money(totals.paidAmount), "", "", "", ""];
+                for (let n = 0; n < maxInstallments; n++) totalRow.push("", "");
+                totalRow.push(money(totals.pending));
+                lines.push(totalRow.map(esc).join(","));
+                lines.push("");
+                lines.push("");
+            }
+
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
+            return res.send(lines.join("\n"));
+        }
+
+        // ═══ PDF ═══
+        if (format === "pdf") {
+            let pagesHtml = "";
+            allData.forEach((data, idx) => {
+                const { batch, programName, dateRangeText, maxInstallments, studentRows, totals } = data;
+
+                let theadTop = `<th rowspan="2">Full Name</th><th rowspan="2">Total Amount</th><th rowspan="2">Total received</th><th rowspan="2">Invoice date</th><th rowspan="2">Installment plan</th><th colspan="2">Advance Payment</th>`;
+                let theadBottom = `<th>Date of receipt</th><th>Amount</th>`;
+                for (let n = 1; n <= maxInstallments; n++) {
+                    theadTop += `<th colspan="2">Installment ${n}</th>`;
+                    theadBottom += `<th>Date of receipt</th><th>Amount</th>`;
+                }
+                theadTop += `<th rowspan="2">Pending</th>`;
+
+                let bodyRows = "";
+                for (const r of studentRows) {
+                    let cells = `<td class="name">${r.name}</td><td>${money(r.totalAmount)}</td><td>${money(r.paidAmount)}</td><td>${dateStr(r.issueDate)}</td><td>${r.installmentPlan}</td><td>${dateStr(r.advance.date)}</td><td>${money(r.advance.amount)}</td>`;
+                    for (const inst of r.installments) cells += `<td>${dateStr(inst.date)}</td><td>${money(inst.amount)}</td>`;
+                    cells += `<td>${money(r.pending)}</td>`;
+                    bodyRows += `<tr>${cells}</tr>`;
+                }
+
+                let totalCells = `<td>Total</td><td>${money(totals.totalAmount)}</td><td>${money(totals.paidAmount)}</td><td></td><td></td><td></td><td></td>`;
+                for (let n = 0; n < maxInstallments; n++) totalCells += `<td></td><td></td>`;
+                totalCells += `<td>${money(totals.pending)}</td>`;
+
+                const pageBreakStyle = idx < allData.length - 1 ? "page-break-after: always;" : "";
+
+                pagesHtml += `
+                    <div class="batch-page" style="${pageBreakStyle}">
+                        <h1>${batch.name}</h1>
+                        <h2>${programName}${dateRangeText ? " — " + dateRangeText : ""}</h2>
+                        <table><thead><tr>${theadTop}</tr><tr>${theadBottom}</tr></thead>
+                        <tbody>${bodyRows}</tbody><tfoot><tr>${totalCells}</tr></tfoot></table>
+                    </div>
+                `;
+            });
+
+                        const html = `
+                <!DOCTYPE html><html><head><meta charset="utf-8" /><style>
+                    * { box-sizing: border-box; }
+                    @page { margin: 24px; }
+                    html, body { margin: 0; padding: 0; }
+                    body { font-family: Arial, Helvetica, sans-serif; }
+                    .batch-page { padding: 24px 24px 40px 24px; }
+                    h1 { font-size: 16px; margin: 0 0 2px 0; }
+                    h2 { font-size: 12px; font-weight: normal; color: #444; margin: 0 0 14px 0; }
+                    table { border-collapse: collapse; width: 100%; font-size: 9px; margin-bottom: 20px; }
+                    th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: center; white-space: nowrap; }
+                    th { background: #f3f3f3; font-weight: bold; }
+                    td.name { text-align: left; font-weight: 500; }
+                    tfoot td { font-weight: bold; background: #fafafa; }
+                </style></head><body>${pagesHtml}</body></html>
+            `;
+
+            const maxCols = Math.max(...allData.map((d) => 5 + (d.maxInstallments + 1) * 2 + 1));
+            const nameColWidth = 140;
+            const otherColWidth = 78;
+            const totalWidthPx = nameColWidth + (maxCols - 1) * otherColWidth + 40;
+            const widthIn = (totalWidthPx / 96).toFixed(2);
+
+            const browser = await launchBrowser();
+            const page = await browser.newPage();
+            await page.setContent(html, { waitUntil: "networkidle0" });
+
+            const bodyHeight = await page.evaluate(() => document.body.scrollHeight);
+            const heightIn = ((bodyHeight + 40) / 96).toFixed(2);
+
+            const pdfUint8Array = await page.pdf({
+                width: `${widthIn}in`,
+                height: `${heightIn}in`,
+                printBackground: true,
+                margin: { top: "0px", bottom: "0px", left: "0px", right: "0px" },
+            });
+
+            await browser.close();
+            const pdfBuffer = Buffer.from(pdfUint8Array);
+
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.pdf"`);
+            res.setHeader("Content-Length", pdfBuffer.length);
+            return res.end(pdfBuffer);
+        }
+
+        // ═══ XLSX (default) — one sheet per batch ═══
+        const workbook = new ExcelJS.Workbook();
+        const usedSheetNames = new Set();
+
+        for (const data of allData) {
+            const { batch, programName, dateRangeText, maxInstallments, studentRows, totals } = data;
+
+            let baseName = batch.name.replace(/[\\/?*[\]:]/g, "-").slice(0, 31);
+            let uniqueName = baseName || "Batch";
+            let suffix = 1;
+            while (usedSheetNames.has(uniqueName)) {
+                uniqueName = `${baseName.slice(0, 28)}-${suffix}`;
+                suffix++;
+            }
+            usedSheetNames.add(uniqueName);
+
+            const sheet = workbook.addWorksheet(uniqueName);
+            const totalCols = 5 + (maxInstallments + 1) * 2 + 1;
+
+            sheet.getCell(1, 1).value = programName;
+            sheet.getCell(1, 1).font = { bold: true, size: 13 };
+            sheet.mergeCells(1, 2, 1, totalCols);
+            sheet.getCell(1, 2).value = dateRangeText;
+            sheet.getCell(1, 2).font = { bold: true };
+            sheet.getCell(1, 2).alignment = { horizontal: "center" };
+
+            const headerRowIndex = 3;
+            const subHeaderRowIndex = 4;
+            const row1 = ["Full Name", "Total Amount", "Total received", "Invoice date", "Installment plan", "Advance Payment", ""];
+            const row2 = ["", "", "", "", "", "Date of receipt", "Amount"];
+            for (let n = 1; n <= maxInstallments; n++) {
+                row1.push(`Installment ${n}`, "");
+                row2.push("Date of receipt", "Amount");
+            }
+            row1.push("Pending");
+            row2.push("");
+
+            sheet.getRow(headerRowIndex).values = row1;
+            sheet.getRow(subHeaderRowIndex).values = row2;
+            sheet.mergeCells(headerRowIndex, 1, subHeaderRowIndex, 1);
+            sheet.mergeCells(headerRowIndex, 2, subHeaderRowIndex, 2);
+            sheet.mergeCells(headerRowIndex, 3, subHeaderRowIndex, 3);
+            sheet.mergeCells(headerRowIndex, 4, subHeaderRowIndex, 4);
+            sheet.mergeCells(headerRowIndex, 5, subHeaderRowIndex, 5);
+            let col = 6;
+            for (let n = 0; n <= maxInstallments; n++) {
+                sheet.mergeCells(headerRowIndex, col, headerRowIndex, col + 1);
+                col += 2;
+            }
+            sheet.mergeCells(headerRowIndex, totalCols, subHeaderRowIndex, totalCols);
+            sheet.getRow(headerRowIndex).font = { bold: true };
+            sheet.getRow(subHeaderRowIndex).font = { bold: true };
+
+            const currencyFmt = '"Rs. "#,##0.00';
+            const dateFmt = "dd/mm/yyyy";
+            let currentRow = subHeaderRowIndex + 1;
+            for (const r of studentRows) {
+                const rowData = [r.name, r.totalAmount, r.paidAmount, r.issueDate, r.installmentPlan, r.advance.date, r.advance.amount];
+                for (const inst of r.installments) rowData.push(inst.date, inst.amount);
+                rowData.push(r.pending);
+
+                const excelRow = sheet.getRow(currentRow);
+                excelRow.values = rowData;
+                excelRow.getCell(2).numFmt = currencyFmt;
+                excelRow.getCell(3).numFmt = currencyFmt;
+                excelRow.getCell(4).numFmt = dateFmt;
+                let c = 6;
+                for (let n = 0; n <= maxInstallments; n++) {
+                    excelRow.getCell(c).numFmt = dateFmt;
+                    excelRow.getCell(c + 1).numFmt = currencyFmt;
+                    c += 2;
+                }
+                excelRow.getCell(totalCols).numFmt = currencyFmt;
+                currentRow++;
+            }
+
+            currentRow++;
+            const totalRow = sheet.getRow(currentRow);
+            totalRow.getCell(1).value = "Total";
+            totalRow.getCell(1).font = { bold: true };
+            totalRow.getCell(2).value = totals.totalAmount;
+            totalRow.getCell(2).numFmt = currencyFmt;
+            totalRow.getCell(2).font = { bold: true };
+            totalRow.getCell(3).value = totals.paidAmount;
+            totalRow.getCell(3).numFmt = currencyFmt;
+            totalRow.getCell(3).font = { bold: true };
+            totalRow.getCell(totalCols).value = totals.pending;
+            totalRow.getCell(totalCols).numFmt = currencyFmt;
+            totalRow.getCell(totalCols).font = { bold: true };
+
+            sheet.columns.forEach((column) => { column.width = 18; });
+        }
+
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.xlsx"`);
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (error) {
+        console.error("BULK BATCH EXPORT ERROR:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 // POST /admin/v1/batches/:id/students — Add student to batch
 exports.adminAddStudentToBatch = async (req, res) => {
     try {
