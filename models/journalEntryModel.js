@@ -66,9 +66,9 @@ const journalEntrySchema = new mongoose.Schema(
         message: "Journal entry is unbalanced — debits must equal credits",
       },
     },
-    sourceType: {
+     sourceType: {
       type: String,
-      enum: ["payment", "invoice", "expense", "manual", "refund", "adjustment"],
+      enum: ["payment", "invoice", "expense", "manual", "refund", "adjustment", "cheque_discard"],
       default: null,
     },
     sourceRef: {

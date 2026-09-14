@@ -135,6 +135,35 @@ const notifyBookRequested = ({ adminId, userName, bookTitle, leadId }) => {
 };
 
 
+// Cheque discarded — notify every finance/admin/super_admin recipient
+const notifyChequeDiscarded = async ({ userIds, chequeNumber, amount, invoiceNumber, reason, triggeredBy }) => {
+  return Promise.all(
+    (userIds || []).map((uid) =>
+      createNotification({
+        user_id: uid,
+        type: "cheque_discarded",
+        title: "Cheque Discarded",
+        message: `Cheque #${chequeNumber} (Rs ${Number(amount || 0).toLocaleString()}) on invoice ${invoiceNumber} was discarded${reason ? ` — ${reason}` : ""}.`,
+        triggered_by: triggeredBy || undefined,
+      })
+    )
+  );
+};
+
+const notifyChequeExpired = async ({ userIds, chequeNumber, amount, invoiceNumber, triggeredBy }) => {
+  return Promise.all(
+    (userIds || []).map((uid) =>
+      createNotification({
+        user_id: uid,
+        type: "cheque_discarded",
+        title: "Cheque Expired",
+        message: `Cheque #${chequeNumber} (Rs ${Number(amount || 0).toLocaleString()}) on invoice ${invoiceNumber} has passed its 6-month validity. It has NOT been discarded automatically — review and discard manually if needed.`,
+        triggered_by: triggeredBy || undefined,
+      })
+    )
+  );
+};
+
 module.exports = {
   createNotification,
   notifyLeadAssigned,
@@ -144,5 +173,7 @@ module.exports = {
   notifyContractSubmitted,
   notifyAccessExtended,
   notifyPoolExhausted,
-  notifyBookRequested
+  notifyBookRequested,
+  notifyChequeDiscarded,
+  notifyChequeExpired,
 };

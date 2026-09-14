@@ -10,6 +10,10 @@ const {
   getInvoiceById,
   markInvoicePaid,
   markInstallmentPaid,
+  recordChequePayment,
+  getInvoiceCheques,
+  discardCheque,
+  bounceCheque,
   editPaidInstallment,
   updateInstallment,
   deleteInstallment,
@@ -98,6 +102,10 @@ router.delete(
 );
 router.patch("/invoices/:id/mark-paid", protect, authorize("finance_manager", "admin", "super_admin"), markInvoicePaid);
 router.patch("/invoices/:invoiceId/installments/:installmentId/mark-paid", protect, authorize("admin", "super_admin", "finance_manager"), uploadReceiptFile, markInstallmentPaid);
+router.post("/invoices/:invoiceId/cheques", protect, authorize("admin", "super_admin", "finance_manager"), recordChequePayment);
+router.get("/invoices/:invoiceId/cheques", protect, authorize("admin", "super_admin", "finance_manager"), getInvoiceCheques);
+router.patch("/invoices/:invoiceId/cheques/:chequeId/discard", protect, authorize("admin", "super_admin", "finance_manager"), discardCheque);
+router.patch("/invoices/:invoiceId/cheques/:chequeId/bounce", protect, authorize("admin", "super_admin", "finance_manager"), bounceCheque);
 router.patch(
   "/invoices/:invoiceId/installments/:installmentId/correct",
   protect,

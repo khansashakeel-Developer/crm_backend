@@ -20,6 +20,8 @@ const JournalEntry = require("../models/journalEntryModel.js");
 const reverseJournalEntry = require("../utils/reverseJournalEntry.js");
 const { invoiceNumberExists, reserveNextInvoiceNumber } = require("../utils/invoiceNumber.js");
 const generateReceivingInvoiceTemplate = require("../template/generate-receiving-invoice.js");
+const Cheque = require("../models/chequeModel.js");
+const { notifyChequeDiscardRecipients } = require("../utils/chequeDiscardHelpers.js");
 
 function getNetAmount(invoice) {
   return Math.max(0, (invoice.totalAmount || 0) - (invoice.discountAmount || 0));
@@ -1206,7 +1208,7 @@ exports.markInstallmentPaid = async (req, res) => {
       message: "Installment marked as paid",
       data: invoice,
     });
-  } catch (err) {
+    } catch (err) {
     await session.abortTransaction();
     console.error("markInstallmentPaid error:", err);
     return res.status(500).json({ success: false, message: err.message });
@@ -1215,6 +1217,209 @@ exports.markInstallmentPaid = async (req, res) => {
   }
 };
 
+// ── RECORD CHEQUE — just logs it as pending, no money counted yet ──
+exports.recordChequePayment = async (req, res) => {
+  try {
+    const { invoiceId } = req.params;
+    const { accountHolderName, cheques } = req.body;
+
+    if (!accountHolderName || !Array.isArray(cheques) || cheques.length === 0) {
+      return res.status(400).json({ success: false, message: "Account holder name and at least one cheque are required" });
+    }
+    for (const c of cheques) {
+      if (!c.chequeNumber || !c.amount || Number(c.amount) <= 0) {
+        return res.status(400).json({ success: false, message: "Each cheque needs a cheque number and a valid amount" });
+      }
+    }
+
+    const invoice = await Invoice.findById(invoiceId);
+    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
+
+    const totalAmount = cheques.reduce((sum, c) => sum + Number(c.amount), 0);
+    if (totalAmount > invoice.remainingAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Cheque total (Rs ${totalAmount}) exceeds remaining balance (Rs ${invoice.remainingAmount}) — cheques can't exceed what's owed`,
+      });
+    }
+
+    const chequeDocs = await Cheque.create(
+      cheques.map((c) => ({
+        invoice: invoice._id,
+        user: invoice.user,
+        accountHolderName,
+        chequeNumber: c.chequeNumber,
+        amount: Number(c.amount),
+        date: c.date ? new Date(c.date) : null,
+        status: "pending",
+        createdBy: req.user._id,
+      }))
+    );
+
+    await logAudit({
+      req,
+      action: "CHEQUE_RECORDED",
+      module: "finance",
+      targetId: invoice._id,
+      after: { cheques: chequeDocs.map((c) => ({ chequeNumber: c.chequeNumber, amount: c.amount })) },
+    });
+
+    return res.json({ success: true, message: "Cheque(s) recorded — pending clearance", data: { cheques: chequeDocs } });
+  } catch (err) {
+    console.error("recordChequePayment error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+// ── LIST CHEQUES for an invoice ───────────────────────────────────
+exports.getInvoiceCheques = async (req, res) => {
+  try {
+    const { invoiceId } = req.params;
+    const cheques = await Cheque.find({ invoice: invoiceId }).sort({ createdAt: -1 });
+    res.json({ success: true, data: cheques });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── DISCARD A CHEQUE — reverses it off the installment it was applied to ──
+// ── DISCARD (= CLEARED) — cheque banked successfully, money now counted ──
+exports.discardCheque = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { invoiceId, chequeId } = req.params;
+
+    const invoice = await Invoice.findById(invoiceId).session(session);
+    if (!invoice) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Invoice not found" });
+    }
+
+    const cheque = await Cheque.findOne({ _id: chequeId, invoice: invoiceId }).session(session);
+    if (!cheque) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Cheque not found" });
+    }
+    if (cheque.status !== "pending") {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: `Cheque is already ${cheque.status}` });
+    }
+
+    if (cheque.amount > invoice.remainingAmount) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: "Cheque amount exceeds remaining balance — invoice may have changed since this cheque was recorded" });
+    }
+
+    const before = invoice.toObject();
+    const paidAtValue = new Date();
+
+    const payment = new Payment({
+      invoice: invoice._id,
+      enrollment: invoice.enrollment,
+      user: invoice.user,
+      amount: cheque.amount,
+      method: "cheque",
+      status: "approved",
+      approvedBy: req.user._id,
+      approvedAt: new Date(),
+      paidAt: paidAtValue,
+      receivedBy: req.user._id,
+      notes: `Cheque #${cheque.chequeNumber} cleared`,
+    });
+    await payment.save({ session });
+
+    cheque.status = "cleared";
+    cheque.clearedAt = paidAtValue;
+    cheque.clearedBy = req.user._id;
+    cheque.paymentId = payment._id;
+    await cheque.save({ session });
+
+    invoice.paidAmount = (invoice.paidAmount || 0) + cheque.amount;
+    invoice.remainingAmount = Math.max(0, invoice.remainingAmount - cheque.amount);
+    invoice.status =
+      invoice.remainingAmount === 0 ? "PAID"
+        : invoice.paidAmount > 0 ? "PARTIAL"
+          : "PENDING";
+    await invoice.save({ session });
+
+    await postPaymentJournal({
+      amount: cheque.amount,
+      method: "cheque",
+      paymentId: payment._id,
+      userId: req.user._id,
+      description: `Cheque #${cheque.chequeNumber} cleared — ${invoice.invoiceNumber}`,
+      date: paidAtValue,
+      session,
+    });
+
+    await logAudit({
+      req,
+      action: "CHEQUE_CLEARED",
+      module: "finance",
+      targetId: invoice._id,
+      before,
+      after: invoice.toObject(),
+    });
+
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Cheque cleared — payment recorded", data: invoice });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("discardCheque (clear) error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+// ── BOUNCE — cheque failed, no money was ever counted, just flag it ──
+exports.bounceCheque = async (req, res) => {
+  try {
+    const { invoiceId, chequeId } = req.params;
+    const { reason, depositDate, bounceDate } = req.body;
+
+    if (!depositDate || !bounceDate) {
+      return res.status(400).json({ success: false, message: "Deposit date and bounce date are both required" });
+    }
+
+    const cheque = await Cheque.findOne({ _id: chequeId, invoice: invoiceId });
+    if (!cheque) return res.status(404).json({ success: false, message: "Cheque not found" });
+    if (cheque.status !== "pending") {
+      return res.status(400).json({ success: false, message: `Cheque is already ${cheque.status}` });
+    }
+
+    cheque.status = "bounced";
+    cheque.depositDate = new Date(depositDate);
+    cheque.bounceDate = new Date(bounceDate);
+    cheque.bouncedAt = new Date();
+    cheque.bouncedBy = req.user._id;
+    cheque.bounceReason = reason || "Cheque bounced";
+    await cheque.save();
+
+    await logAudit({
+      req,
+      action: "CHEQUE_BOUNCED",
+      module: "finance",
+      targetId: invoiceId,
+      after: { chequeNumber: cheque.chequeNumber, reason: cheque.bounceReason },
+    });
+
+    const invoice = await Invoice.findById(invoiceId).select("invoiceNumber");
+    notifyChequeDiscardRecipients({
+      chequeNumber: cheque.chequeNumber,
+      amount: cheque.amount,
+      invoiceNumber: invoice?.invoiceNumber || "—",
+      reason: cheque.bounceReason,
+      triggeredBy: req.user._id,
+    }).catch((err) => console.error("notifyChequeDiscardRecipients failed:", err.message));
+
+    res.json({ success: true, message: "Cheque marked as bounced", data: cheque });
+  } catch (err) {
+    console.error("bounceCheque error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 // ── EDIT A PAID INSTALLMENT (amount/date correction after payment) ──
 // exports.editPaidInstallment = async (req, res) => {
 //   const session = await mongoose.startSession();
