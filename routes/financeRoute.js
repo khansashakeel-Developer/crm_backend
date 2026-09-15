@@ -14,6 +14,8 @@ const {
   getInvoiceCheques,
   discardCheque,
   bounceCheque,
+  returnCheque,
+  updateCheque,
   editPaidInstallment,
   updateInstallment,
   deleteInstallment,
@@ -106,6 +108,8 @@ router.post("/invoices/:invoiceId/cheques", protect, authorize("admin", "super_a
 router.get("/invoices/:invoiceId/cheques", protect, authorize("admin", "super_admin", "finance_manager"), getInvoiceCheques);
 router.patch("/invoices/:invoiceId/cheques/:chequeId/discard", protect, authorize("admin", "super_admin", "finance_manager"), discardCheque);
 router.patch("/invoices/:invoiceId/cheques/:chequeId/bounce", protect, authorize("admin", "super_admin", "finance_manager"), bounceCheque);
+router.patch("/invoices/:invoiceId/cheques/:chequeId/edit", protect, authorize("admin", "super_admin", "finance_manager"), updateCheque);
+router.patch("/invoices/:invoiceId/cheques/:chequeId/return", protect, authorize("admin", "super_admin", "finance_manager"), returnCheque);
 router.patch(
   "/invoices/:invoiceId/installments/:installmentId/correct",
   protect,

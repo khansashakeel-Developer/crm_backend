@@ -1221,7 +1221,7 @@ exports.markInstallmentPaid = async (req, res) => {
 exports.recordChequePayment = async (req, res) => {
   try {
     const { invoiceId } = req.params;
-    const { accountHolderName, cheques } = req.body;
+    const { accountHolderName, cheques, isBackfill } = req.body;
 
     if (!accountHolderName || !Array.isArray(cheques) || cheques.length === 0) {
       return res.status(400).json({ success: false, message: "Account holder name and at least one cheque are required" });
@@ -1236,7 +1236,7 @@ exports.recordChequePayment = async (req, res) => {
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
 
     const totalAmount = cheques.reduce((sum, c) => sum + Number(c.amount), 0);
-    if (totalAmount > invoice.remainingAmount) {
+    if (!isBackfill && totalAmount > invoice.remainingAmount) {
       return res.status(400).json({
         success: false,
         message: `Cheque total (Rs ${totalAmount}) exceeds remaining balance (Rs ${invoice.remainingAmount}) — cheques can't exceed what's owed`,
@@ -1252,13 +1252,14 @@ exports.recordChequePayment = async (req, res) => {
         amount: Number(c.amount),
         date: c.date ? new Date(c.date) : null,
         status: "pending",
+        isBackfill: !!isBackfill,   // ← ADD THIS LINE
         createdBy: req.user._id,
       }))
     );
 
     await logAudit({
       req,
-      action: "CHEQUE_RECORDED",
+      action: isBackfill ? "CHEQUE_BACKFILLED" : "CHEQUE_RECORDED",
       module: "finance",
       targetId: invoice._id,
       after: { cheques: chequeDocs.map((c) => ({ chequeNumber: c.chequeNumber, amount: c.amount })) },
@@ -1306,7 +1307,7 @@ exports.discardCheque = async (req, res) => {
       return res.status(400).json({ success: false, message: `Cheque is already ${cheque.status}` });
     }
 
-    if (cheque.amount > invoice.remainingAmount) {
+    if (!cheque.isBackfill && cheque.amount > invoice.remainingAmount) {
       await session.abortTransaction();
       return res.status(400).json({ success: false, message: "Cheque amount exceeds remaining balance — invoice may have changed since this cheque was recorded" });
     }
@@ -1370,6 +1371,98 @@ exports.discardCheque = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     session.endSession();
+  }
+};
+
+// ── UPDATE — fix a typo on a cheque, only allowed before any action (still pending) ──
+exports.updateCheque = async (req, res) => {
+  try {
+    const { invoiceId, chequeId } = req.params;
+    const { accountHolderName, chequeNumber, amount, date } = req.body;
+
+    const invoice = await Invoice.findById(invoiceId);
+    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
+
+    const cheque = await Cheque.findOne({ _id: chequeId, invoice: invoiceId });
+    if (!cheque) return res.status(404).json({ success: false, message: "Cheque not found" });
+
+    if (cheque.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Cheque is already ${cheque.status} and can no longer be edited`,
+      });
+    }
+
+    if (!accountHolderName || !chequeNumber || !amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: "Account holder name, cheque number, and a valid amount are required" });
+    }
+
+    const newAmount = Number(amount);
+    if (!cheque.isBackfill && newAmount > invoice.remainingAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Amount (Rs ${newAmount}) exceeds remaining balance (Rs ${invoice.remainingAmount})`,
+      });
+    }
+    if (cheque.isBackfill && newAmount > invoice.totalAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Amount (Rs ${newAmount}) exceeds invoice total (Rs ${invoice.totalAmount})`,
+      });
+    }
+
+    const before = cheque.toObject();
+
+    cheque.accountHolderName = accountHolderName;
+    cheque.chequeNumber = chequeNumber;
+    cheque.amount = newAmount;
+    cheque.date = date ? new Date(date) : null;
+    await cheque.save();
+
+    await logAudit({
+      req,
+      action: "CHEQUE_UPDATED",
+      module: "finance",
+      targetId: invoiceId,
+      before: { accountHolderName: before.accountHolderName, chequeNumber: before.chequeNumber, amount: before.amount, date: before.date },
+      after: { accountHolderName: cheque.accountHolderName, chequeNumber: cheque.chequeNumber, amount: cheque.amount, date: cheque.date },
+    });
+
+    return res.json({ success: true, message: "Cheque updated", data: cheque });
+  } catch (err) {
+    console.error("updateCheque error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── RETURN — cheque handed back to client (or voided), no money ever counted ──
+exports.returnCheque = async (req, res) => {
+  try {
+    const { invoiceId, chequeId } = req.params;
+
+    const cheque = await Cheque.findOne({ _id: chequeId, invoice: invoiceId });
+    if (!cheque) return res.status(404).json({ success: false, message: "Cheque not found" });
+    if (cheque.status !== "pending") {
+      return res.status(400).json({ success: false, message: `Cheque is already ${cheque.status}` });
+    }
+
+    cheque.status = "returned";
+    cheque.returnedAt = new Date();
+    cheque.returnedBy = req.user._id;
+    await cheque.save();
+
+    await logAudit({
+      req,
+      action: "CHEQUE_RETURNED",
+      module: "finance",
+      targetId: invoiceId,
+      after: { chequeNumber: cheque.chequeNumber, amount: cheque.amount },
+    });
+
+    return res.json({ success: true, message: "Cheque returned to client — no payment recorded", data: cheque });
+  } catch (err) {
+    console.error("returnCheque error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
