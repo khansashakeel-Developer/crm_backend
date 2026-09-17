@@ -8,6 +8,7 @@ const Batch = require("../models/batchModel.js");
 const Enrollment = require("../models/enrollmentModel");
 const Invoice = require("../models/invoiceModel");
 const ExcelJS = require("exceljs"); // For Excel export-Khansa
+const { allocateBundleLevels, allocateInstallmentsToLevels } = require("../utils/bundleLevelAllocation");
 
 // ── Shared export helpers ──────────────────────────────────
 const formatDateRange = (start, end) => {
@@ -28,24 +29,83 @@ async function buildBatchExportData(batch) {
     const enrollments = await Enrollment.find({ batch: batch._id }).select("_id user");
     const enrollmentByUser = new Map(enrollments.map((e) => [e.user.toString(), e._id.toString()]));
     const enrollmentIds = enrollments.map((e) => e._id);
+    const enrollmentIdStrings = enrollmentIds.map((id) => id.toString());
 
+    // ── Bundle invoices bhi milengi ab, items.enrollment se match karke ──
     const invoices = await Invoice.find({
-        enrollment: { $in: enrollmentIds },
+        $or: [
+            { enrollment: { $in: enrollmentIds } },
+            { "items.enrollment": { $in: enrollmentIds } },
+        ],
         status: { $ne: "CANCELLED" },
-    }).select("totalAmount paidAmount remainingAmount issueDate installments enrollment");
+    })
+        .select("totalAmount discountAmount paidAmount remainingAmount issueDate installments enrollment isBundle items")
+        .populate("items.program", "level");
 
-    const invoiceByEnrollment = new Map(invoices.map((inv) => [inv.enrollment.toString(), inv]));
+    // ── Har enrollment (chahe single ho ya bundle ka ek level) ke liye
+    //     uska apna slice/invoice attach karo ──
+    const invoiceByEnrollment = new Map();
 
+        for (const inv of invoices) {
+        if (inv.isBundle && Array.isArray(inv.items) && inv.items.length > 0) {
+            const programItems = inv.items
+                .filter((it) => !it.feeType || it.feeType === "program")
+                .map((it) => ({
+                    enrollment: it.enrollment,
+                    program: it.program?._id,
+                    level: it.program?.level,
+                    amount: it.amount,
+                }));
+
+            const allocations = allocateBundleLevels(
+                programItems,
+                Number(inv.discountAmount || 0),
+                Number(inv.paidAmount || 0)
+            );
+
+            const installmentAllocations = allocateInstallmentsToLevels(
+                programItems,
+                Number(inv.discountAmount || 0),
+                inv.installments || []
+            );
+
+            allocations.forEach((slice) => {
+                if (enrollmentIdStrings.includes(slice.enrollment)) {
+                    const levelInstallments = installmentAllocations.get(slice.enrollment) || { advance: null, installments: [] };
+
+                    invoiceByEnrollment.set(slice.enrollment, {
+                        totalAmount: slice.gross,
+                        paidAmount: slice.paid,
+                        remainingAmount: slice.remaining,
+                        issueDate: inv.issueDate,
+                        _levelAdvance: levelInstallments.advance,
+                        _levelInstallments: levelInstallments.installments,
+                    });
+                }
+            });
+        } else {
+            const enrollmentStr = inv.enrollment?.toString();
+            if (enrollmentStr) {
+                invoiceByEnrollment.set(enrollmentStr, {
+                    totalAmount: inv.totalAmount,
+                    paidAmount: inv.paidAmount,
+                    remainingAmount: inv.remainingAmount,
+                    issueDate: inv.issueDate,
+                    installments: inv.installments,
+                });
+            }
+        }
+    }
     let maxInstallments = 0;
-    for (const inv of invoices) {
-        const regularCount = (inv.installments || []).filter((i) => !i.isAdvance).length;
-        if (regularCount > maxInstallments) maxInstallments = regularCount;
+    for (const inv of invoiceByEnrollment.values()) {
+        const count = inv._levelInstallments ? inv._levelInstallments.length : (inv.installments || []).filter((i) => !i.isAdvance).length;
+        if (count > maxInstallments) maxInstallments = count;
     }
 
     const programName = batch.program_id?.name || "";
     const dateRangeText = formatDateRange(batch.start_date, batch.end_date);
 
-    const studentRows = (batch.students || []).map((student) => {
+        const studentRows = (batch.students || []).map((student) => {
         const enrollmentId = enrollmentByUser.get(student._id.toString());
         const invoice = enrollmentId ? invoiceByEnrollment.get(enrollmentId) : null;
 
@@ -64,19 +124,33 @@ async function buildBatchExportData(batch) {
             row.totalAmount = invoice.totalAmount || 0;
             row.paidAmount = invoice.paidAmount || 0;
             row.issueDate = invoice.issueDate || "";
-
-            const regularInstallments = (invoice.installments || []).filter((i) => !i.isAdvance);
-            row.installmentPlan = regularInstallments.length;
-
-            const advance = (invoice.installments || []).find((i) => i.isAdvance);
-            row.advance = { date: advance?.paidAt || "", amount: advance?.paidAmount || "" };
-
-            for (let n = 0; n < maxInstallments; n++) {
-                const inst = regularInstallments[n];
-                row.installments.push({ date: inst?.paidAt || "", amount: inst?.paidAmount || "" });
-            }
-
             row.pending = invoice.remainingAmount || 0;
+
+            if (invoice._levelAdvance !== undefined) {
+                // ── Bundle: use the per-level installment mapping ──
+                row.advance = {
+                    date: invoice._levelAdvance?.date || "",
+                    amount: invoice._levelAdvance?.amount || "",
+                };
+                row.installmentPlan = (invoice._levelInstallments || []).length + (invoice._levelAdvance ? 1 : 0);
+                for (let n = 0; n < maxInstallments; n++) {
+                    const inst = (invoice._levelInstallments || [])[n];
+                    row.installments.push({ date: inst?.date || "", amount: inst?.amount || "" });
+                }
+            } else {
+                // ── Single-program: original logic, untouched ──
+                const regularInstallments = (invoice.installments || []).filter((i) => !i.isAdvance);
+                const hasAdvance = (invoice.installments || []).some((i) => i.isAdvance && Number(i.paidAmount) > 0);
+                row.installmentPlan = regularInstallments.length + (hasAdvance ? 1 : 0);
+
+                const advance = (invoice.installments || []).find((i) => i.isAdvance);
+                row.advance = { date: advance?.paidAt || "", amount: advance?.paidAmount || "" };
+
+                for (let n = 0; n < maxInstallments; n++) {
+                    const inst = regularInstallments[n];
+                    row.installments.push({ date: inst?.paidAt || "", amount: inst?.paidAmount || "" });
+                }
+            }
         } else {
             for (let n = 0; n < maxInstallments; n++) {
                 row.installments.push({ date: "", amount: "" });
@@ -97,25 +171,6 @@ async function buildBatchExportData(batch) {
     );
 
     return { batch, programName, dateRangeText, maxInstallments, studentRows, totals };
-}
-
-async function launchBrowser() {
-    const isVercel = !!process.env.VERCEL;
-    if (isVercel) {
-        const chromium = (await import("@sparticuz/chromium")).default;
-        const puppeteerCore = (await import("puppeteer-core")).default;
-        return puppeteerCore.launch({
-            args: chromium.args,
-            defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
-        });
-    }
-    const puppeteer = (await import("puppeteer")).default;
-    return puppeteer.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
 }
 // ═══════════════════════════════════════
 // PUBLIC ENDPOINTS
@@ -959,6 +1014,184 @@ exports.adminGetBatchById = async (req, res) => {
 */
 
 // GET /admin/v1/batches/:id
+// GET /admin/v1/batches/:id
+// GET /admin/v1/batches/:id
+exports.adminGetBatchById = async (req, res) => {
+    try {
+        const batch = await Batch.findById(req.params.id)
+            .populate("program_id", "name slug")
+            .populate("instructor_id", "name email phone");
+
+        if (!batch) {
+            return res.status(404).json({ success: false, message: "Batch not found" });
+        }
+
+        // â”€â”€ Batch ke students ka source-of-truth: Enrollment collection.
+        //     batch.students (denormalized array) par depend nahi karte,
+        //     kyunki wo drift ho sakta hai aur students list se missing
+        //     ho sakte hain, jaisa production mein dekha gaya â”€â”€
+        const enrollments = await Enrollment.find({
+            batch: batch._id,
+            program: batch.program_id._id ?? batch.program_id,
+        })
+            .select("_id user program audioAccess status accessStatus")
+            .populate("user", "name email phone avatarColor");
+
+        const enrollmentIds = enrollments.map((e) => e._id);
+        const enrollmentIdStrings = enrollmentIds.map((id) => id.toString());
+
+        // Batch ki invoices â€” bundle invoices bhi milengi jinka
+        // top-level "enrollment" is batch se match nahi karta, lekin
+        // unke items[] mein is batch ka enrollment hai
+        const invoices = await Invoice.find({
+            $or: [
+                { enrollment: { $in: enrollmentIds } },
+                { "items.enrollment": { $in: enrollmentIds } },
+            ],
+            status: { $ne: "CANCELLED" },
+        })
+            .select("totalAmount discountAmount paidAmount remainingAmount installments issueDate enrollment isBundle items")
+            .populate("items.program", "level");
+
+        const revenue = invoices.reduce(
+            (acc, invoice) => {
+                if (invoice.isBundle && Array.isArray(invoice.items) && invoice.items.length > 0) {
+                    const programItems = invoice.items
+                        .filter((it) => !it.feeType || it.feeType === "program")
+                        .map((it) => ({
+                            enrollment: it.enrollment,
+                            program: it.program?._id,
+                            level: it.program?.level,
+                            amount: it.amount,
+                        }));
+
+                    const allocations = allocateBundleLevels(
+                        programItems,
+                        Number(invoice.discountAmount || 0),
+                        Number(invoice.paidAmount || 0)
+                    );
+
+                    const matchingSlices = allocations.filter((a) =>
+                        enrollmentIdStrings.includes(a.enrollment)
+                    );
+
+                    matchingSlices.forEach((slice) => {
+                        acc.grossAmount += slice.gross;
+                        acc.discountAmount += slice.discount;
+                        acc.netAmount += slice.net;
+                        acc.paidAmount += slice.paid;
+                        acc.remainingAmount += slice.remaining;
+                    });
+                } else {
+                    const gross = Number(invoice.totalAmount || 0);
+                    const discount = Number(invoice.discountAmount || 0);
+                    const paid = Number(invoice.paidAmount || 0);
+                    const remaining = Number(invoice.remainingAmount || 0);
+
+                    acc.grossAmount += gross;
+                    acc.discountAmount += discount;
+                    acc.netAmount += gross - discount;
+                    acc.paidAmount += paid;
+                    acc.remainingAmount += remaining;
+                }
+
+                return acc;
+            },
+            {
+                grossAmount: 0,
+                discountAmount: 0,
+                netAmount: 0,
+                paidAmount: 0,
+                remainingAmount: 0,
+            }
+        );
+
+        revenue.paidPercentage = revenue.netAmount > 0
+            ? Number(((revenue.paidAmount / revenue.netAmount) * 100).toFixed(1))
+            : 0;
+
+        // â”€â”€ Har enrollment (= har student) ke liye invoice slice attach karo â”€â”€
+        const studentsWithEnrollment = enrollments
+            .filter((enrollment) => enrollment.user) // safety: skip if user was deleted
+            .map((enrollment) => {
+                const enrollmentIdStr = enrollment._id.toString();
+
+                const studentInvoice = invoices.find((inv) => {
+                    if (inv.enrollment?.toString() === enrollmentIdStr) return true;
+                    return (inv.items || []).some(
+                        (it) => it.enrollment?.toString() === enrollmentIdStr
+                    );
+                });
+
+                let invoiceData = null;
+
+                if (studentInvoice) {
+                    if (studentInvoice.isBundle && Array.isArray(studentInvoice.items) && studentInvoice.items.length > 0) {
+                        const programItems = studentInvoice.items
+                            .filter((it) => !it.feeType || it.feeType === "program")
+                            .map((it) => ({
+                                enrollment: it.enrollment,
+                                program: it.program?._id,
+                                level: it.program?.level,
+                                amount: it.amount,
+                            }));
+
+                        const allocations = allocateBundleLevels(
+                            programItems,
+                            Number(studentInvoice.discountAmount || 0),
+                            Number(studentInvoice.paidAmount || 0)
+                        );
+
+                        const mySlice = allocations.find((a) => a.enrollment === enrollmentIdStr);
+
+                        if (mySlice) {
+                            invoiceData = {
+                                totalAmount: mySlice.gross,
+                                discountAmount: mySlice.discount,
+                                netAmount: mySlice.net,
+                                paidAmount: mySlice.paid,
+                                remainingAmount: mySlice.remaining,
+                                issueDate: studentInvoice.issueDate,
+                                installments: studentInvoice.installments,
+                                isBundleSlice: true,
+                            };
+                        }
+                    } else {
+                        invoiceData = {
+                            totalAmount: studentInvoice.totalAmount,
+                            paidAmount: studentInvoice.paidAmount,
+                            remainingAmount: studentInvoice.remainingAmount,
+                            issueDate: studentInvoice.issueDate,
+                            installments: studentInvoice.installments,
+                        };
+                    }
+                }
+
+                const user = enrollment.user;
+
+                return {
+                    ...(user.toObject ? user.toObject() : user),
+                    enrollmentId: enrollment._id,
+                    audioAccess: enrollment.audioAccess ?? true,
+                    enrollmentStatus: enrollment.status ?? null,
+                    accessStatus: enrollment.accessStatus ?? null,
+                    invoice: invoiceData,
+                };
+            });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                ...batch.toObject(),
+                revenue,
+                students: studentsWithEnrollment,
+            },
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+/*
 exports.adminGetBatchById = async (req, res) => {
     try {
         const batch = await Batch.findById(req.params.id)
@@ -1055,8 +1288,8 @@ exports.adminGetBatchById = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+*/
 
-// GET /admin/v1/batches/:id/export
 // GET /admin/v1/batches/:id/export
 exports.adminExportBatchPayments = async (req, res) => {
     try {
