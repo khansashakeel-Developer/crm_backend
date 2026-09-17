@@ -827,14 +827,6 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
   if (!invoice) throw new Error("Invoice is required");
   if (!customerId) throw new Error("QBO Customer Id is required");
 
-  if (!options.dryRun) {
-    const existing = await findInvoiceByDocNumber(invoice.invoiceNumber);
-    if (existing) {
-      console.log(`[QBO] Invoice ${invoice.invoiceNumber} already exists (Id: ${existing.Id})`);
-      return existing;
-    }
-  }
-
   const Program = require("../models/programModel");
   const Enrollment = require("../models/enrollmentModel");
   const lines = [];
@@ -921,6 +913,42 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
       totalItemDiscount += Number(item.discount || 0);
     }
 
+    // ✅ NEW — CPD/Manual fees added post-creation via Edit Installments
+    // (these never land in `items`, only in `installments`)
+    const EXTRA_FEE_TYPES = ["certificate", "manual"];
+    const feeLabels = { certificate: "CPD / Certificate Fee", manual: "Manual Fee" };
+    let programIdForExtras = null;
+    if (invoice.enrollment) {
+      const enrollment = await Enrollment.findById(invoice.enrollment).select("program");
+      programIdForExtras = enrollment?.program;
+    } else if (invoice.enrollments?.length) {
+      const enrollment = await Enrollment.findById(invoice.enrollments[0]).select("program");
+      programIdForExtras = enrollment?.program;
+    }
+
+    const extraFeeGroups = {};
+    for (const inst of invoice.installments || []) {
+      const ft = inst.feeType || "program";
+      if (EXTRA_FEE_TYPES.includes(ft)) {
+        extraFeeGroups[ft] = (extraFeeGroups[ft] || 0) + Number(inst.amount || 0);
+      }
+    }
+
+    for (const [feeType, amount] of Object.entries(extraFeeGroups)) {
+      if (amount <= 0) continue;
+      const itemId = await resolveItemId(programIdForExtras, feeType);
+      lines.push({
+        Amount: amount,
+        DetailType: "SalesItemLineDetail",
+        Description: feeLabels[feeType] || feeType,
+        SalesItemLineDetail: {
+          ItemRef: itemId ? { value: itemId } : undefined,
+          UnitPrice: amount,
+          Qty: 1,
+        },
+      });
+    }
+
     const discount = totalItemDiscount || Number(invoice.discountAmount || 0);
     if (discount > 0) {
       const discountAccountId = process.env.QBO_DISCOUNT_ACCOUNT_ID;
@@ -935,29 +963,64 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
       });
     }
   } else {
-    const gross = Number(invoice.totalAmount || 0);
-    const discount = Number(invoice.discountAmount || 0);
-
+    // ── Non-bundle: Program gross = totalAmount − (CPD + Manual), computed
+    // from the CURRENT installments array — so if a second CPD/Manual fee
+    // was added since the last sync, this naturally reflects the new total.
     let programId = null;
     if (invoice.enrollment) {
       const enrollment = await Enrollment.findById(invoice.enrollment).select("program");
       programId = enrollment?.program;
     }
-    const itemId = await resolveItemId(programId, "program");
 
-    if (gross > 0) {
+    const EXTRA_FEE_TYPES = ["certificate", "manual"];
+    const extraFeeGroups = {};
+    let extraFeeTotal = 0;
+
+    for (const inst of invoice.installments || []) {
+      const ft = inst.feeType || "program";
+      if (EXTRA_FEE_TYPES.includes(ft)) {
+        extraFeeGroups[ft] = (extraFeeGroups[ft] || 0) + Number(inst.amount || 0);
+        extraFeeTotal += Number(inst.amount || 0);
+      }
+    }
+
+    const programGross = Math.max(0, Number(invoice.totalAmount || 0) - extraFeeTotal);
+    const feeLabels = {
+      program: invoice.description || `Invoice ${invoice.invoiceNumber}`,
+      certificate: "CPD / Certificate Fee",
+      manual: "Manual Fee",
+    };
+
+    if (programGross > 0) {
+      const programItemId = await resolveItemId(programId, "program");
       lines.push({
-        Amount: gross,
+        Amount: programGross,
         DetailType: "SalesItemLineDetail",
-        Description: invoice.description || `Invoice ${invoice.invoiceNumber}`,
+        Description: feeLabels.program,
         SalesItemLineDetail: {
-          ItemRef: itemId ? { value: itemId } : undefined,
-          UnitPrice: gross,
+          ItemRef: programItemId ? { value: programItemId } : undefined,
+          UnitPrice: programGross,
           Qty: 1,
         },
       });
     }
 
+    for (const [feeType, amount] of Object.entries(extraFeeGroups)) {
+      if (amount <= 0) continue;
+      const itemId = await resolveItemId(programId, feeType);
+      lines.push({
+        Amount: amount,
+        DetailType: "SalesItemLineDetail",
+        Description: feeLabels[feeType] || feeType,
+        SalesItemLineDetail: {
+          ItemRef: itemId ? { value: itemId } : undefined,
+          UnitPrice: amount,
+          Qty: 1,
+        },
+      });
+    }
+
+    const discount = Number(invoice.discountAmount || 0);
     if (discount > 0) {
       lines.push({
         Amount: discount,
@@ -974,6 +1037,42 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
       delete l.SalesItemLineDetail.ItemRef;
     }
   });
+
+  const netTotal = lines.reduce((sum, l) => {
+    return l.DetailType === "DiscountLineDetail" ? sum - l.Amount : sum + l.Amount;
+  }, 0);
+
+  // ── Check if this invoice already exists in QBO ──
+  if (!options.dryRun) {
+    const existing = await findInvoiceByDocNumber(invoice.invoiceNumber);
+
+    if (existing) {
+      const existingTotal = Number(existing.TotalAmt || 0);
+
+      // ✅ NEW — if what we'd send now doesn't match what's already in QBO,
+      // update the existing invoice's lines instead of silently returning stale data.
+      if (Math.round(existingTotal * 100) !== Math.round(netTotal * 100)) {
+        console.log(
+          `[QBO] Invoice ${invoice.invoiceNumber} exists but amount changed ` +
+          `(QBO: ${existingTotal}, CRM now: ${netTotal}) — updating lines`
+        );
+
+        const updatePayload = {
+          Id: existing.Id,
+          SyncToken: existing.SyncToken,
+          sparse: true,
+          CustomerRef: { value: customerId },
+          Line: lines,
+        };
+
+        const updated = await qboRequest("POST", "/invoice?minorversion=65", updatePayload, options);
+        return updated.Invoice || updated;
+      }
+
+      console.log(`[QBO] Invoice ${invoice.invoiceNumber} already exists and is up to date (Id: ${existing.Id})`);
+      return existing;
+    }
+  }
 
   const payload = {
     CustomerRef: { value: customerId },
@@ -1009,6 +1108,7 @@ async function syncInvoice(invoiceDoc, userDoc, options = {}) {
     invoiceDoc.qboInvoiceId = qboInvoice.Id;
     invoiceDoc.qboSyncStatus = "synced";
     invoiceDoc.qboLastSyncedAt = new Date();
+    invoiceDoc.qboLastAttemptAt = new Date();
     invoiceDoc.qboSyncError = null;
     await invoiceDoc.save(options.session ? { session: options.session } : undefined);
     return qboInvoice;
@@ -1019,6 +1119,7 @@ async function syncInvoice(invoiceDoc, userDoc, options = {}) {
     if (!options.dryRun && typeof invoiceDoc?.save === "function") {
       try {
         invoiceDoc.qboSyncStatus = "failed";
+        invoiceDoc.qboLastAttemptAt = new Date();
         invoiceDoc.qboSyncError = err.message;
         await invoiceDoc.save();
       } catch (saveErr) {
@@ -1036,12 +1137,27 @@ async function syncInvoice(invoiceDoc, userDoc, options = {}) {
 // PAYMENT
 // ─────────────────────────────────────────────────────────
 
+
 async function createQboPayment({ payment, invoice, customerId, qboInvoiceId }, options = {}) {
   if (!payment || !qboInvoiceId || !customerId) {
     throw new Error("payment, qboInvoiceId and customerId are required");
   }
   if (payment.status !== "approved") {
     throw new Error("Only approved payments can be synced to QBO");
+  }
+
+  if (!options.dryRun) {
+    const existing = await findDuplicatePayment({
+      paymentId: payment._id,
+      customerId,
+      qboInvoiceId,
+      amount: payment.amount,
+      txnDate: payment.paidAt || new Date(),
+    });
+    if (existing) {
+      console.log(`[QBO] Duplicate payment found (Id: ${existing.Id}) — reusing instead of creating new`);
+      return existing;
+    }
   }
 
   const depositAccountId =
@@ -1056,7 +1172,7 @@ async function createQboPayment({ payment, invoice, customerId, qboInvoiceId }, 
       ? new Date(payment.paidAt).toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10),
     PaymentRefNum: payment.referenceNumber || undefined,
-    PrivateNote: `${payment.notes || "Payment"} | Invoice ${invoice.invoiceNumber} | CRM Payment ID: ${payment._id}`,  // ✅ updated
+    PrivateNote: `${payment.notes || "Payment"} | Invoice ${invoice.invoiceNumber} | CRM Payment ID: ${payment._id}`,
     Line: [
       {
         Amount: Number(payment.amount),
@@ -1114,6 +1230,36 @@ async function syncPayment(paymentDoc, invoiceDoc, userDoc, options = {}) {
   }
 }
 
+async function findDuplicatePayment({ paymentId, customerId, qboInvoiceId, amount, txnDate }) {
+  if (!customerId) return null;
+
+  // ── Check 1: PrivateNote contains this CRM Payment ID (fast, exact match) ──
+  if (paymentId) {
+    const noteQuery = `SELECT * FROM Payment WHERE CustomerRef = '${customerId}'`;
+    const noteData = await qboRequest("GET", `/query?query=${encodeURIComponent(noteQuery)}&minorversion=65`);
+    const notePayments = noteData.QueryResponse?.Payment || [];
+    const byNote = notePayments.find((p) => (p.PrivateNote || "").includes(String(paymentId)));
+    if (byNote) return byNote;
+  }
+
+  // ── Check 2: fallback — same invoice + same amount + same date ──
+  if (!txnDate) return null;
+  const dateStr = new Date(txnDate).toISOString().slice(0, 10);
+  const query = `SELECT * FROM Payment WHERE CustomerRef = '${customerId}' AND TxnDate = '${dateStr}'`;
+  const data = await qboRequest("GET", `/query?query=${encodeURIComponent(query)}&minorversion=65`);
+  const payments = data.QueryResponse?.Payment || [];
+
+  return (
+    payments.find((p) => {
+      const sameAmount = Number(p.TotalAmt) === Number(amount);
+      const sameInvoice = qboInvoiceId
+        ? (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId))
+        : true;
+      return sameAmount && sameInvoice;
+    }) || null
+  );
+}
+
 // ─────────────────────────────────────────────────────────
 // OAUTH
 // ─────────────────────────────────────────────────────────
@@ -1153,6 +1299,52 @@ async function getTokenStatus() {
 }
 
 // ─────────────────────────────────────────────────────────
+// DISCONNECT
+// ─────────────────────────────────────────────────────────
+
+async function revokeToken() {
+  const token = await loadToken();
+  if (!token?.refresh_token) {
+    console.log("[QBO] revokeToken: no stored token, nothing to revoke");
+    return;
+  }
+
+  const clientId = isProd ? process.env.QBO_PROD_CLIENT_ID : process.env.QBO_DEV_CLIENT_ID;
+  const clientSecret = isProd ? process.env.QBO_PROD_CLIENT_SECRET : process.env.QBO_DEV_CLIENT_SECRET;
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+  try {
+    await axios.post(
+      "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
+      { token: token.refresh_token },
+      {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("[QBO] Token revoked with Intuit");
+  } catch (err) {
+    // If Intuit says the token is already invalid/expired, that's fine —
+    // we're disconnecting either way. Only rethrow on unexpected errors.
+    const status = err.response?.status;
+    if (status === 400 || status === 401) {
+      console.warn("[QBO] revokeToken: Intuit says token already invalid, proceeding to clear locally");
+    } else {
+      throw err;
+    }
+  }
+}
+
+async function clearStoredTokens() {
+  cachedToken = null;
+  await QboToken.deleteOne({ environment: ENV_KEY });
+  console.log(`[QBO] Cleared stored ${ENV_KEY} tokens`);
+}
+
+// ─────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────
 
@@ -1162,6 +1354,8 @@ module.exports = {
   getAuthorizationUri,
   handleOAuthCallback,
   getTokenStatus,
+  revokeToken,
+  clearStoredTokens,
   findOrCreateCustomer,
   syncCustomer,
   findOrCreateItem,

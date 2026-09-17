@@ -61,6 +61,7 @@ const invoiceSchema = new mongoose.Schema(
       default: "pending",
     },
     qboLastSyncedAt: { type: Date, default: null },
+    qboLastAttemptAt: { type: Date, default: null },
     qboSyncError: { type: String, default: null },
   },
   { timestamps: true }
