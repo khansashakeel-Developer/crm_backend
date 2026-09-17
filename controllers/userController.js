@@ -56,11 +56,12 @@ exports.getAllUsers = async (req, res) => {
       }
     }
 
-    // ── Search ──
+        // ── Search ──
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: "i" } },
         { email: { $regex: search, $options: "i" } },
+        { phone: { $regex: search, $options: "i" } },
       ];
     }
 
