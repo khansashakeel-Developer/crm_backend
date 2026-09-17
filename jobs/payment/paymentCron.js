@@ -21,6 +21,10 @@ const Enrollment = require("../../models/enrollmentModel.js");
 const Invoice = require("../../models/invoiceModel.js");
 const User = require("../../models/userModel.js");
 const AuditLog = require("../../models/auditLogModel.js");
+const Cheque = require("../../models/chequeModel.js");
+const { notifyChequeExpiredRecipients } = require("../../utils/chequeDiscardHelpers.js");
+const { discardChequeAndReverse, notifyChequeDiscardRecipients } = require("../../utils/chequeDiscardHelpers.js");
+
 
 // ─── Helper: Audit log (no req object needed) ─────────────────
 async function logCronAudit({ action, module, targetId, before, after }) {
@@ -38,6 +42,124 @@ async function logCronAudit({ action, module, targetId, before, after }) {
   } catch (err) {
     console.error("Cron audit log failed:", err.message);
   }
+}
+// ─────────────────────────────────────────────────────────────
+// CHEQUE EXPIRY — cheques dated 6+ months ago and still "pending"
+// get auto-discarded, reversed, and finance/admin get notified.
+// ─────────────────────────────────────────────────────────────
+async function checkExpiredCheques() {
+  console.log("🔍 Checking for expired cheques...");
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+  const invoices = await Invoice.find({
+    "installments.chequeDetails.cheques": {
+      $elemMatch: { status: "pending", date: { $ne: null, $lte: sixMonthsAgo } },
+    },
+  });
+
+  let expiredCount = 0;
+
+  for (const invoiceRef of invoices) {
+    for (const installmentRef of invoiceRef.installments) {
+      const cheques = installmentRef.chequeDetails?.cheques || [];
+      for (let idx = 0; idx < cheques.length; idx++) {
+        const chequeRef = cheques[idx];
+        if (chequeRef.status !== "pending" || !chequeRef.date || new Date(chequeRef.date) > sixMonthsAgo) continue;
+
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+          const invoice = await Invoice.findById(invoiceRef._id).session(session);
+          const installment = invoice.installments.id(installmentRef._id);
+          const cheque = installment.chequeDetails.cheques[idx];
+
+          if (!cheque || cheque.status !== "pending") {
+            await session.abortTransaction();
+            session.endSession();
+            continue;
+          }
+
+          const reason = "Auto-discarded — 6 month validity period expired";
+
+          await discardChequeAndReverse({
+            invoice, installment, chequeIndex: idx,
+            discardedBy: null, reason, session,
+          });
+
+          await AuditLog.create([{
+            user: null,
+            action: "CHEQUE_AUTO_DISCARDED_EXPIRED",
+            module: "finance",
+            targetId: invoice._id.toString(),
+            before: { chequeNumber: cheque.chequeNumber, status: "pending" },
+            after: { chequeNumber: cheque.chequeNumber, status: "discarded" },
+            ip: "cron",
+            createdAt: new Date(),
+          }], { session });
+
+          await session.commitTransaction();
+          session.endSession();
+
+          await notifyChequeDiscardRecipients({
+            chequeNumber: cheque.chequeNumber,
+            amount: cheque.amount,
+            invoiceNumber: invoice.invoiceNumber,
+            reason,
+            triggeredBy: null,
+          });
+
+          expiredCount++;
+          console.log(`⏰ Cheque #${cheque.chequeNumber} auto-discarded (expired) — Invoice ${invoice.invoiceNumber}`);
+        } catch (err) {
+          await session.abortTransaction();
+          session.endSession();
+          console.error(`❌ Cheque expiry discard failed:`, err.message);
+        }
+      }
+    }
+  }
+
+  console.log(`✅ Expired cheque check complete — ${expiredCount} cheque(s) discarded`);
+  return expiredCount;
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// CHEQUE EXPIRY NOTIFICATIONS — no auto-discard, just alerts finance
+// once per cheque when it crosses the 6-month validity mark.
+// ─────────────────────────────────────────────────────────────
+async function checkExpiredChequeNotifications() {
+  console.log("🔍 Checking for newly-expired cheques (notify only)...");
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+  const expiredCheques = await Cheque.find({
+    status: "pending",
+    date: { $ne: null, $lte: sixMonthsAgo },
+    expiryNotifiedAt: null,
+  }).populate("invoice", "invoiceNumber");
+
+  let notifiedCount = 0;
+
+  for (const cheque of expiredCheques) {
+    try {
+      await notifyChequeExpiredRecipients({
+        chequeNumber: cheque.chequeNumber,
+        amount: cheque.amount,
+        invoiceNumber: cheque.invoice?.invoiceNumber || "—",
+      });
+      cheque.expiryNotifiedAt = new Date();
+      await cheque.save();
+      notifiedCount++;
+      console.log(`⏰ Notified finance — Cheque #${cheque.chequeNumber} expired`);
+    } catch (err) {
+      console.error(`❌ Cheque expiry notify failed for #${cheque.chequeNumber}:`, err.message);
+    }
+  }
+
+  console.log(`✅ Expiry notification check complete — ${notifiedCount} cheque(s) notified`);
+  return notifiedCount;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -208,13 +330,17 @@ async function runPaymentCron() {
       }
     }
 
-    // ── Step 3: Report ────────────────────────────────────────
+    // ── Step 3: Cheque expiry notifications ────────────────────
+    stats.chequesNotified = await checkExpiredChequeNotifications();
+
+    // ── Step 4: Report ────────────────────────────────────────
     console.log("\n─────────────────────────────────");
     console.log(`✅ Cron Complete: ${new Date().toLocaleString()}`);
     console.log(`📋 Invoices marked OVERDUE : ${stats.overdueInvoices}`);
     console.log(`🔒 Access RESTRICTED       : ${stats.restricted}`);
     console.log(`⏳ Access EXTENDED         : ${stats.extended}`);
     console.log(`✅ Access REACTIVATED      : ${stats.reactivated}`);
+    console.log(`📩 Cheques expiry-notified : ${stats.chequesNotified}`);
     console.log(`❌ Errors                  : ${stats.errors}`);
     console.log("─────────────────────────────────\n");
 

@@ -42,27 +42,26 @@ const invoiceSchema = new mongoose.Schema(
       paidAt: { type: Date, default: null },
       status: { type: String, enum: ["PENDING", "PAID", "OVERDUE"], default: "PENDING" },
       isAdvance: { type: Boolean, default: false },
-      feeType: { type: String, enum: ["program", "certificate", "manual"], default: "program" }, // 👈 add
-      program: { type: mongoose.Schema.Types.ObjectId, ref: "Program", default: null }, // 👈 add
-      enrollment: { type: mongoose.Schema.Types.ObjectId, ref: "Enrollment", default: null }, // 👈 add
+      feeType: { type: String, enum: ["program", "certificate", "manual"], default: "program" },
+      program: { type: mongoose.Schema.Types.ObjectId, ref: "Program", default: null },
+      enrollment: { type: mongoose.Schema.Types.ObjectId, ref: "Enrollment", default: null },
       method: { type: String, enum: ["cash", "bank", "cheque", "manual"], default: null },
       referenceNumber: { type: String, default: null },
       notes: { type: String, default: null },
       receiptUrl: { type: String, default: null },
       receiptPublicId: { type: String, default: null },
+      // ─── QuickBooks Online Sync ───────────────────────────────────
+      qboInvoiceId: { type: String, default: null, index: true },
+      qboSyncStatus: {
+        type: String,
+        enum: ["pending", "synced", "failed", "skipped"],
+        default: "pending",
+      },
+      qboLastSyncedAt: { type: Date, default: null },
+      qboLastAttemptAt: { type: Date, default: null },
+      qboSyncError: { type: String, default: null },
       paymentId: { type: mongoose.Schema.Types.ObjectId, ref: "Payment", default: null },
     }],
-
-    // ─── QuickBooks Online Sync ───────────────────────────────────
-    qboInvoiceId: { type: String, default: null, index: true },
-    qboSyncStatus: {
-      type: String,
-      enum: ["pending", "synced", "failed", "skipped"],
-      default: "pending",
-    },
-    qboLastSyncedAt: { type: Date, default: null },
-    qboLastAttemptAt: { type: Date, default: null },
-    qboSyncError: { type: String, default: null },
   },
   { timestamps: true }
 );
