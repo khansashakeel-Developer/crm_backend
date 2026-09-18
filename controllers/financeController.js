@@ -2450,15 +2450,26 @@ exports.getAllPayments = async (req, res) => {
     if (method) filter.method = method;
     if (userId) filter.user = userId;
 
-    // 👇 naya — Student name/email se search (getAllInvoices jaisa pattern)
+        // search by Student name/email/phone/invoice number
     if (search) {
+      const searchRegex = { $regex: search, $options: "i" };
+
       const matchedUsers = await User.find({
         $or: [
-          { name: { $regex: search, $options: "i" } },
-          { email: { $regex: search, $options: "i" } },
+          { name: searchRegex },
+          { email: searchRegex },
+          { phone: searchRegex },
         ],
       }).select("_id");
-      filter.user = { $in: matchedUsers.map((u) => u._id) };
+
+      const matchedInvoices = await Invoice.find({
+        invoiceNumber: searchRegex,
+      }).select("_id");
+
+      filter.$or = [
+        { user: { $in: matchedUsers.map((u) => u._id) } },
+        { invoice: { $in: matchedInvoices.map((inv) => inv._id) } },
+      ];
     }
 
     // Date filter runs on paidAt (not createdAt)
