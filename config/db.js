@@ -36,7 +36,7 @@ async function connectDB() {
   if (!cached.promise) {
     cached.promise = mongoose
       .connect(process.env.ATLAS_URL, {
-        dbName: "alcoCRM",
+        dbName: process.env.ATLAS_DBNAME,
         serverSelectionTimeoutMS: 5000,
         maxPoolSize: 10,
         // useNewUrlParser: true,
