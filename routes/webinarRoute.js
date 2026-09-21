@@ -17,11 +17,11 @@ const {
 
 // ---------- ADMIN ROUTES ----------
 router.post('/', protect, authorize('admin', 'super_admin'), createWebinar);
-router.get('/', protect, authorize('admin', 'super_admin'), getAllWebinars);
-router.get('/:id', protect, authorize('admin', 'super_admin'), getWebinarById);
+router.get('/', protect, authorize('admin', 'super_admin', "sales_manager"), getAllWebinars);
+router.get('/:id', protect, authorize('admin', 'super_admin', "sales_manager"), getWebinarById);
 router.put('/:id', protect, authorize('admin', 'super_admin'), updateWebinar);
 router.delete('/:id', protect, authorize('admin', 'super_admin'), deleteWebinar);
-router.get('/:id/registrations', protect, authorize('admin', 'super_admin'), getWebinarRegistrations);
+router.get('/:id/registrations', protect, authorize('admin', 'super_admin', "sales_manager"), getWebinarRegistrations);
 // routes/webinarRoutes.js
 // router.patch('/:id/assign', protect, authorize('admin', 'super_admin'), assignWebinar);// routes/webinarRoutes.js
 router.post('/:id/duplicate', protect, authorize('admin', 'super_admin'), duplicateWebinar);
