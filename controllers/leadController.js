@@ -3451,7 +3451,7 @@ exports.sendPaymentPlanInvoice = async (req, res) => {
                 studentEmail: lead.email,
                 studentPhone: lead.phone || "—",
                 salesManagerName: lead.assigned_to?.name || "Finance Team",
-                salesManagerEmail: lead.assigned_to?.email || "finance@alco.com",
+                salesManagerEmail: lead.assigned_to?.email || "finance@arslanlarik.com",
                 batchName: "—",
                 batchStartDate: "—",
                 batchEndDate: "—",

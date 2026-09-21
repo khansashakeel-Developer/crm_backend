@@ -81,7 +81,7 @@ async function sendPaymentPlanInvoiceEmail(invoiceId) {
       studentEmail: user.email,
       studentPhone: user.phone || "—",
       salesManagerName: "Finance Team",
-      salesManagerEmail: "finance@alco.com",
+      salesManagerEmail: "finance@arslanlarik.com",
       batchName: invoice.enrollment?.batch?.name || "—",
       batchStartDate: formatDate(invoice.enrollment?.batch?.start_date),
       batchEndDate: formatDate(invoice.enrollment?.batch?.end_date),

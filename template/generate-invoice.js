@@ -504,7 +504,7 @@ module.exports = `
 //         <strong>{{advanceDueDate}}</strong> to activate enrollment.
 //         Remaining installments are due monthly as per schedule above.
 //         Late payments may result in restricted portal access.
-//         For queries contact: <strong>finance@alco.com</strong>
+//         For queries contact: <strong>finance@arslanlarik.com</strong>
 //       </div>
 //     </div>
 
