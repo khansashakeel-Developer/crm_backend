@@ -27,7 +27,7 @@ module.exports = `
           </table>
           <div style="font-size:11.5px;color:#94a3b8;line-height:1.7;margin-top:14px;">
             D86/1, block 7, Gulshan-e-iqbal, karachi, Sindh PK<br/>
-            connect@arslanlarik.com &nbsp;|&nbsp; 1+8886814808<br/>
+            connect@arslanlarik.com &nbsp;|&nbsp; +18886814808<br/>
             https://arslanlarik.com/ &nbsp;|&nbsp; NTN: 2826497-5
           </div>
         </td>
@@ -212,7 +212,7 @@ module.exports = `
         <ul style="margin:0;padding-left:18px;font-size:13px;color:#4a5060;line-height:1.8;">
           <li>This is an auto-generated invoice and therefore requires no signature.</li>
 
-          <li>All payments remitted, including initial down payments, are deemed final and non-refundable upon receipt.
+          <li>Fees are non-refundable once the programme commences. A full refund is available if you cancel in writing 7 or more calendar days before your batch start date. See our Refund and Cooling-Off Policy.
           </li>
 
           <li>Certificates will be awarded after successful test evaluation and full payment completion.</li>
@@ -238,12 +238,10 @@ module.exports = `
           </div>
 
           <div style="font-size:11px;color:#8a92a6;line-height:1.8;">
-            Cash &nbsp;|&nbsp; Bank Transfer &nbsp;|&nbsp; Cheque<br /><br />
+            Bank Transfer &nbsp;|&nbsp; Cheque<br /><br />
 
             <strong style="color:#0f1117;">HBL Bank</strong><br />
             <strong>Account Title:</strong> ARSLAN LARIK &amp; Company<br />
-            <strong>Account Number:</strong> 19107901888203<br />
-            <strong>IBAN:</strong> PK94HABB0019107901888203<br />
             <strong>Branch:</strong> Korangi Road, DHA Phase II
           </div>
         </td>

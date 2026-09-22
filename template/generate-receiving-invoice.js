@@ -35,7 +35,7 @@ module.exports = `
   D86/1, block 7, Gulshan-e-iqbal, karachi, Sindh PK<br />
   <a href="mailto:connect@arslanlarik.com" style="color:#94a3b8 !important;text-decoration:none !important;">connect@arslanlarik.com</a>
   &nbsp;|&nbsp;
-  <a href="tel:+8886814808" style="color:#94a3b8 !important;text-decoration:none !important;">1+8886814808</a><br />
+  <a href="tel:+8886814808" style="color:#94a3b8 !important;text-decoration:none !important;">+18886814808</a><br />
   <a href="https://arslanlarik.com/" style="color:#94a3b8 !important;text-decoration:none !important;">https://arslanlarik.com/</a>
 </div>
               </td>
