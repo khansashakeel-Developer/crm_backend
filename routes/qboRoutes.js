@@ -499,10 +499,13 @@ router.get("/compare/invoices", protect, authorize(...ROLES), async (req, res) =
 // GET /api/qbo-compare/payments
 router.get("/compare/payments", protect, authorize(...ROLES), async (req, res) => {
   try {
-    const [crmPayments, qboPayments] = await Promise.all([
+    const [crmPayments, qboPayments, qboInvoices] = await Promise.all([
       Payment.find({}).populate("user", "name email").populate("invoice", "invoiceNumber").lean(),
       fetchAllQbo("Payment"),
+      fetchAllQbo("Invoice"), // ✅ added
     ]);
+
+    const qboDocNumberById = new Map(qboInvoices.map((inv) => [inv.Id, inv.DocNumber])); // ✅ added
 
     const qboById = new Map(qboPayments.map((p) => [p.Id, p]));
     const qboIdsMatched = new Set();
@@ -531,8 +534,9 @@ router.get("/compare/payments", protect, authorize(...ROLES), async (req, res) =
 
     for (const q of qboPayments) {
       if (qboIdsMatched.has(q.Id)) continue;
+      const linkedInvoiceId = q.Line?.[0]?.LinkedTxn?.[0]?.TxnId || null; // ✅
       rows.push({
-        invoiceNumber: q.Line?.[0]?.LinkedTxn?.[0]?.TxnId || null,
+        invoiceNumber: linkedInvoiceId ? (qboDocNumberById.get(linkedInvoiceId) || null) : null, // ✅ fixed
         customer: q.CustomerRef?.name || null,
         crm: { exists: false },
         qbo: { exists: true, qboId: q.Id, totalAmt: q.TotalAmt, txnDate: q.TxnDate },

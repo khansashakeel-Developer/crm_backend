@@ -896,6 +896,9 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
   // }
   if (Array.isArray(invoice.items) && invoice.items.length) {
     let totalItemDiscount = 0;
+    // ✅ track kitna certificate/manual amount items array khud cover kar chuka hai
+    const itemsFeeTotals = {};
+
     for (const item of invoice.items) {
       const gross = Number(item.amount || 0) - Number(item.discount || 0);
       if (gross <= 0) continue;
@@ -911,10 +914,14 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
         },
       });
       totalItemDiscount += Number(item.discount || 0);
+
+      // ✅ agar ye item khud certificate/manual hai, uska amount track karo
+      const ft = item.feeType || "program";
+      if (ft === "certificate" || ft === "manual") {
+        itemsFeeTotals[ft] = (itemsFeeTotals[ft] || 0) + gross;
+      }
     }
 
-    // ✅ NEW — CPD/Manual fees added post-creation via Edit Installments
-    // (these never land in `items`, only in `installments`)
     const EXTRA_FEE_TYPES = ["certificate", "manual"];
     const feeLabels = { certificate: "CPD / Certificate Fee", manual: "Manual Fee" };
     let programIdForExtras = null;
@@ -926,24 +933,29 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
       programIdForExtras = enrollment?.program;
     }
 
-    const extraFeeGroups = {};
+    const installmentFeeTotals = {};
     for (const inst of invoice.installments || []) {
       const ft = inst.feeType || "program";
       if (EXTRA_FEE_TYPES.includes(ft)) {
-        extraFeeGroups[ft] = (extraFeeGroups[ft] || 0) + Number(inst.amount || 0);
+        installmentFeeTotals[ft] = (installmentFeeTotals[ft] || 0) + Number(inst.amount || 0);
       }
     }
 
-    for (const [feeType, amount] of Object.entries(extraFeeGroups)) {
-      if (amount <= 0) continue;
+    // ✅ sirf DIFFERENCE add karo — jo items array mein already cover nahi hua
+    for (const feeType of EXTRA_FEE_TYPES) {
+      const alreadyInItems = itemsFeeTotals[feeType] || 0;
+      const inInstallments = installmentFeeTotals[feeType] || 0;
+      const remaining = inInstallments - alreadyInItems;
+      if (remaining <= 0) continue; // ✅ already covered by items loop — skip, no double count
+
       const itemId = await resolveItemId(programIdForExtras, feeType);
       lines.push({
-        Amount: amount,
+        Amount: remaining,
         DetailType: "SalesItemLineDetail",
         Description: feeLabels[feeType] || feeType,
         SalesItemLineDetail: {
           ItemRef: itemId ? { value: itemId } : undefined,
-          UnitPrice: amount,
+          UnitPrice: remaining,
           Qty: 1,
         },
       });
@@ -1233,31 +1245,39 @@ async function syncPayment(paymentDoc, invoiceDoc, userDoc, options = {}) {
 async function findDuplicatePayment({ paymentId, customerId, qboInvoiceId, amount, txnDate }) {
   if (!customerId) return null;
 
-  // ── Check 1: PrivateNote contains this CRM Payment ID (fast, exact match) ──
+  // ── Check 1: PrivateNote mein isi CRM Payment ID ka exact match ──
+  const noteQuery = `SELECT * FROM Payment WHERE CustomerRef = '${customerId}'`;
+  const noteData = await qboRequest("GET", `/query?query=${encodeURIComponent(noteQuery)}&minorversion=65`);
+  const notePayments = noteData.QueryResponse?.Payment || [];
+
   if (paymentId) {
-    const noteQuery = `SELECT * FROM Payment WHERE CustomerRef = '${customerId}'`;
-    const noteData = await qboRequest("GET", `/query?query=${encodeURIComponent(noteQuery)}&minorversion=65`);
-    const notePayments = noteData.QueryResponse?.Payment || [];
     const byNote = notePayments.find((p) => (p.PrivateNote || "").includes(String(paymentId)));
     if (byNote) return byNote;
   }
 
   // ── Check 2: fallback — same invoice + same amount + same date ──
+  // ✅ FIX: sirf un payments ko candidate maano jinka PrivateNote mein
+  // KOI bhi CRM Payment ID reference nahi (ya khaali) — matlab wo QBO
+  // payment abhi tak kisi aur specific CRM payment se claim nahi hua.
+  // Warna do genuinely alag payments (same amount+date+invoice — jaisa
+  // dono CDP fees ka case hai) ek dusre ko duplicate samajh lete hain.
   if (!txnDate) return null;
   const dateStr = new Date(txnDate).toISOString().slice(0, 10);
-  const query = `SELECT * FROM Payment WHERE CustomerRef = '${customerId}' AND TxnDate = '${dateStr}'`;
-  const data = await qboRequest("GET", `/query?query=${encodeURIComponent(query)}&minorversion=65`);
-  const payments = data.QueryResponse?.Payment || [];
 
-  return (
-    payments.find((p) => {
-      const sameAmount = Number(p.TotalAmt) === Number(amount);
-      const sameInvoice = qboInvoiceId
-        ? (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId))
-        : true;
-      return sameAmount && sameInvoice;
-    }) || null
-  );
+  const candidates = notePayments.filter((p) => {
+    const note = p.PrivateNote || "";
+    const hasAnyCrmId = /CRM Payment ID:\s*\S+/.test(note);
+    if (hasAnyCrmId) return false; // ✅ already claimed by a specific CRM payment — skip
+
+    const sameAmount = Number(p.TotalAmt) === Number(amount);
+    const sameDate = p.TxnDate === dateStr;
+    const sameInvoice = qboInvoiceId
+      ? (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId))
+      : true;
+    return sameAmount && sameDate && sameInvoice;
+  });
+
+  return candidates[0] || null;
 }
 
 // ─────────────────────────────────────────────────────────

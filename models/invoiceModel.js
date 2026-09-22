@@ -33,6 +33,16 @@ const invoiceSchema = new mongoose.Schema(
     dueDate: Date,
     issueDate: { type: Date, default: Date.now },
 
+    // ─── QuickBooks Online Sync ───────────────────────────────────
+    qboInvoiceId: { type: String, default: null, index: true },
+    qboSyncStatus: {
+      type: String,
+      enum: ["pending", "synced", "failed", "skipped"],
+      default: "pending",
+    },
+    qboLastSyncedAt: { type: Date, default: null },
+    qboLastAttemptAt: { type: Date, default: null },
+    qboSyncError: { type: String, default: null },
 
     installments: [{
       label: { type: String, default: "Installment" },
@@ -50,16 +60,6 @@ const invoiceSchema = new mongoose.Schema(
       notes: { type: String, default: null },
       receiptUrl: { type: String, default: null },
       receiptPublicId: { type: String, default: null },
-      // ─── QuickBooks Online Sync ───────────────────────────────────
-      qboInvoiceId: { type: String, default: null, index: true },
-      qboSyncStatus: {
-        type: String,
-        enum: ["pending", "synced", "failed", "skipped"],
-        default: "pending",
-      },
-      qboLastSyncedAt: { type: Date, default: null },
-      qboLastAttemptAt: { type: Date, default: null },
-      qboSyncError: { type: String, default: null },
       paymentId: { type: mongoose.Schema.Types.ObjectId, ref: "Payment", default: null },
     }],
   },
