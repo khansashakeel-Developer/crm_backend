@@ -1177,13 +1177,17 @@ async function createQboPayment({ payment, invoice, customerId, qboInvoiceId }, 
       ? process.env.QBO_DEPOSIT_ACCOUNT_CASH
       : process.env.QBO_DEPOSIT_ACCOUNT_BANK;
 
+  // ✅ FIX — QBO ka PaymentRefNum (doc_num) max 21 chars allow karta hai
+  const rawRefNum = payment.referenceNumber || "";
+  const refNum = rawRefNum.length > 21 ? rawRefNum.slice(0, 21) : rawRefNum;
+
   const payload = {
     CustomerRef: { value: customerId },
     TotalAmt: Number(payment.amount),
     TxnDate: payment.paidAt
       ? new Date(payment.paidAt).toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10),
-    PaymentRefNum: payment.referenceNumber || undefined,
+    PaymentRefNum: refNum || undefined,  // ✅ ab kabhi 21 se zyada nahi jayega
     PrivateNote: `${payment.notes || "Payment"} | Invoice ${invoice.invoiceNumber} | CRM Payment ID: ${payment._id}`,
     Line: [
       {
