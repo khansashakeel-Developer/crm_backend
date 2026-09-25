@@ -1059,11 +1059,11 @@ exports.getLeads = async (req, res) => {
             }
         }
 
-        if (hasPaymentPlan === "true") {
+        if (hasPaymentPlan === "true" && !search) {
             query["paymentPlan.totalAmount"] = { $exists: true, $gt: 0 };
         }
 
-        if (hasInvoiceNumber === "true") {
+        if (hasInvoiceNumber === "true" && !search) {
             query["paymentPlan.invoiceNumber"] = { $exists: true, $ne: null, $ne: "" };
         }
 
