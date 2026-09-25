@@ -1055,20 +1055,25 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
   }, 0);
 
   // ── Check if this invoice already exists in QBO ──
+  function lineSignature(lines) {
+    return lines
+      .map(l => `${l.DetailType}:${l.Description}:${Math.round(l.Amount * 100)}`)
+      .sort()
+      .join("|");
+  }
+
+  // ── Check if this invoice already exists in QBO ──
   if (!options.dryRun) {
     const existing = await findInvoiceByDocNumber(invoice.invoiceNumber);
 
     if (existing) {
-      const existingTotal = Number(existing.TotalAmt || 0);
+      const existingSig = lineSignature(
+        (existing.Line || []).filter(l => l.DetailType === "SalesItemLineDetail" || l.DetailType === "DiscountLineDetail")
+      );
+      const newSig = lineSignature(lines);
 
-      // ✅ NEW — if what we'd send now doesn't match what's already in QBO,
-      // update the existing invoice's lines instead of silently returning stale data.
-      if (Math.round(existingTotal * 100) !== Math.round(netTotal * 100)) {
-        console.log(
-          `[QBO] Invoice ${invoice.invoiceNumber} exists but amount changed ` +
-          `(QBO: ${existingTotal}, CRM now: ${netTotal}) — updating lines`
-        );
-
+      if (existingSig !== newSig) {
+        console.log(`[QBO] Invoice ${invoice.invoiceNumber} line breakdown changed — updating`);
         const updatePayload = {
           Id: existing.Id,
           SyncToken: existing.SyncToken,
@@ -1076,15 +1081,45 @@ async function createQboInvoice({ invoice, user, customerId }, options = {}) {
           CustomerRef: { value: customerId },
           Line: lines,
         };
-
         const updated = await qboRequest("POST", "/invoice?minorversion=65", updatePayload, options);
         return updated.Invoice || updated;
       }
 
-      console.log(`[QBO] Invoice ${invoice.invoiceNumber} already exists and is up to date (Id: ${existing.Id})`);
+      console.log(`[QBO] Invoice ${invoice.invoiceNumber} already up to date (Id: ${existing.Id})`);
       return existing;
     }
   }
+
+  // if (!options.dryRun) {
+  //   const existing = await findInvoiceByDocNumber(invoice.invoiceNumber);
+
+  //   if (existing) {
+  //     const existingTotal = Number(existing.TotalAmt || 0);
+
+  //     // ✅ NEW — if what we'd send now doesn't match what's already in QBO,
+  //     // update the existing invoice's lines instead of silently returning stale data.
+  //     if (Math.round(existingTotal * 100) !== Math.round(netTotal * 100)) {
+  //       console.log(
+  //         `[QBO] Invoice ${invoice.invoiceNumber} exists but amount changed ` +
+  //         `(QBO: ${existingTotal}, CRM now: ${netTotal}) — updating lines`
+  //       );
+
+  //       const updatePayload = {
+  //         Id: existing.Id,
+  //         SyncToken: existing.SyncToken,
+  //         sparse: true,
+  //         CustomerRef: { value: customerId },
+  //         Line: lines,
+  //       };
+
+  //       const updated = await qboRequest("POST", "/invoice?minorversion=65", updatePayload, options);
+  //       return updated.Invoice || updated;
+  //     }
+
+  //     console.log(`[QBO] Invoice ${invoice.invoiceNumber} already exists and is up to date (Id: ${existing.Id})`);
+  //     return existing;
+  //   }
+  // }
 
   const payload = {
     CustomerRef: { value: customerId },
