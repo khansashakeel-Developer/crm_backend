@@ -131,14 +131,7 @@ exports.getAllUsers = async (req, res) => {
   try {
     const requesterRole = req.user.role;
 
-    // query params
-    const {
-      page = 1,
-      limit = 10,
-      search = "",
-      role,
-    } = req.query;
-
+    const { page = 1, limit = 10, search = "", role } = req.query;
     const skip = (page - 1) * limit;
 
     let query = {};
@@ -148,42 +141,43 @@ exports.getAllUsers = async (req, res) => {
       query.role = { $nin: ["super_admin", "admin"] };
     }
 
-    // 🔎 Search (name/email)
-    // if (search) {
-    //   query.$or = [
-    //     { name: { $regex: search, $options: "i" } },
-    //     { email: { $regex: search, $options: "i" } },
-    //   ];
-    // }
+    // 🔎 Search by name, email, phone
     if (search) {
-      const searchRegex = new RegExp(search, "i");
+      const searchTerm = search.trim();
 
-      const matchingUsers = await User.find({ name: searchRegex }).select("_id");
-      const matchingUserIds = matchingUsers.map((u) => u._id);
+      // split by whitespace, remove empty strings
+      const words = searchTerm.split(/\s+/).filter(Boolean);
 
-      query.$or = [
-        { first_name: searchRegex },
-        { last_name: searchRegex },
-        { email: searchRegex },
-        { phone: searchRegex },
-        ...(matchingUserIds.length > 0 ? [{ assigned_to: { $in: matchingUserIds } }] : []),
-        {
-          $expr: {
-            $regexMatch: {
-              input: { $concat: ["$first_name", " ", { $ifNull: ["$last_name", ""] }] },
-              regex: search,
-              options: "i",
-            },
-          },
-        },
-      ];
+      // each word must match somewhere in name/email/phone
+      const wordConditions = words.map((word) => {
+        const wordRegex = new RegExp(word, "i");
+        return {
+          $or: [
+            { name: wordRegex },
+            { email: wordRegex },
+            { phone: wordRegex },
+          ],
+        };
+      });
+
+      const searchClause = { $and: wordConditions };
+
+      if (query.role) {
+        query = {
+          $and: [{ role: query.role }, searchClause],
+        };
+      } else {
+        query = { ...query, ...searchClause };
+      }
     }
 
-    // 🎯 Filter by role (optional)
+    // 🎯 Filter by role (optional, only when not already restricted by search $and)
     if (role) {
-      query.role = query.role
-        ? { ...query.role, $eq: role }
-        : role;
+      if (query.$and) {
+        query.$and.push({ role });
+      } else {
+        query.role = query.role ? { ...query.role, $eq: role } : role;
+      }
     }
 
     const users = await User.find(query)
