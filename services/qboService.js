@@ -1319,6 +1319,42 @@ async function findDuplicatePayment({ paymentId, customerId, qboInvoiceId, amoun
   return candidates[0] || null;
 }
 
+async function updateQboPayment({ payment, invoice, customerId, qboInvoiceId }, options = {}) {
+  if (!payment.qboPaymentId) throw new Error("Payment is not synced to QBO");
+
+  const got = await qboRequest("GET", `/payment/${payment.qboPaymentId}?minorversion=65`);
+  const existing = got.Payment;
+  if (!existing) throw new Error("QBO payment not found");
+
+  const depositAccountId =
+    payment.method === "cash"
+      ? process.env.QBO_DEPOSIT_ACCOUNT_CASH
+      : process.env.QBO_DEPOSIT_ACCOUNT_BANK;
+
+  const refNum = String(payment.referenceNumber || "").slice(0, 21); // QBO limit
+
+  const payload = {
+    Id: existing.Id,
+    SyncToken: existing.SyncToken,
+    sparse: true,
+    CustomerRef: existing.CustomerRef || { value: customerId },
+    TotalAmt: Number(payment.amount),
+    PaymentRefNum: refNum,
+    // findDuplicatePayment isi "CRM Payment ID" par depend karta hai, isay na hatayein
+    PrivateNote: `${payment.notes || "Payment"} | Invoice ${invoice.invoiceNumber} | CRM Payment ID: ${payment._id}`,
+    // amount badle to Line bhi update karni parti hai
+    Line: [{
+      Amount: Number(payment.amount),
+      LinkedTxn: [{ TxnId: qboInvoiceId, TxnType: "Invoice" }],
+    }],
+  };
+  if (depositAccountId) payload.DepositToAccountRef = { value: depositAccountId };
+
+  const data = await qboRequest("POST", "/payment?minorversion=65", payload, options);
+  return data.Payment || data;
+}
+
+
 // ─────────────────────────────────────────────────────────
 // OAUTH
 // ─────────────────────────────────────────────────────────
@@ -1403,6 +1439,56 @@ async function clearStoredTokens() {
   console.log(`[QBO] Cleared stored ${ENV_KEY} tokens`);
 }
 
+
+// ─────────────────────────────────────────────────────────
+// Get QBO Attachment
+// ─────────────────────────────────────────────────────────
+
+// QBO Attachable entries dhundo jo kisi specific entity (Payment/Invoice) se linked hon
+// async function getQboAttachmentsForEntity(entityId, entityType = "Payment") {
+//   const q = `SELECT * FROM Attachable`;
+//   const data = await module.exports.qboRequest(
+//     "GET",
+//     `/query?query=${encodeURIComponent(q)}&minorversion=65`
+//   );
+//   const all = data.QueryResponse?.Attachable || [];
+
+//   // sirf wo attachments jo is entity se linked hain
+//   return all.filter((att) =>
+//     (att.AttachableRef || []).some(
+//       (ref) => ref.EntityRef?.value === entityId && ref.EntityRef?.type === entityType
+//     )
+//   );
+// }
+async function getQboAttachmentsForEntity(entityId, entityType = "Payment") {
+  const q = `SELECT * FROM Attachable WHERE AttachableRef.EntityRef.Type = '${entityType}' AND AttachableRef.EntityRef.value = '${entityId}'`;
+  const data = await qboRequest("GET", `/query?query=${encodeURIComponent(q)}&minorversion=65`);
+  return data.QueryResponse?.Attachable || [];
+}
+
+
+// ─────────────────────────────────────────────────────────
+// Get QBO Attachment ID
+// ─────────────────────────────────────────────────────────
+
+
+// Ek Attachable ka actual file (binary) QBO se download karo
+// async function downloadQboAttachment(attachableId) {
+//   const response = await module.exports.qboRequest(
+//     "GET",
+//     `/download/${attachableId}`,
+//     { responseType: "arraybuffer" } // raw bytes chahiye, JSON nahi
+//   );
+//   return response; // Buffer / ArrayBuffer
+// }
+
+async function downloadQboAttachment(attachable) {
+  const url = attachable?.TempDownloadUri;
+  if (!url) throw new Error("Attachment has no TempDownloadUri");
+  const res = await axios.get(url, { responseType: "arraybuffer" });
+  return Buffer.from(res.data);
+}
+
 // ─────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────
@@ -1425,4 +1511,7 @@ module.exports = {
   createQboPayment,
   syncInvoice,
   syncPayment,
+  updateQboPayment,
+  getQboAttachmentsForEntity,
+  downloadQboAttachment
 };

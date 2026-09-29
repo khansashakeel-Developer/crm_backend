@@ -5,6 +5,7 @@ const Enrollment = require("../models/enrollmentModel.js");
 const Lead = require("../models/leadModel.js");
 const User = require("../models/userModel.js");
 const Batch = require("../models/batchModel");
+const qbo = require("../services/qboService.js");
 const Counter = require("../models/counterModel.js");
 const Certificate = require("../models/certificateModel.js");
 const { uploadToCloudinary } = require("../middlewares/uploadReceipt");
@@ -2649,22 +2650,52 @@ exports.updatePayment = async (req, res) => {
     const before = await Payment.findById(req.params.id).lean();
     if (!before) return res.status(404).json({ success: false, message: "Payment not found" });
 
+    const { resyncQbo, amount, method, referenceNumber, notes } = req.body;
+    const changes = { amount, method, referenceNumber, notes };
+    Object.keys(changes).forEach((k) => changes[k] === undefined && delete changes[k]);
+
     const updated = await Payment.findByIdAndUpdate(
       req.params.id,
-      { $set: req.body },
+      { $set: changes },
       { new: true, runValidators: true }
     );
 
     await logAudit({
-      req,
-      action: "PAYMENT_UPDATED",
-      module: "finance",
-      targetId: updated._id,
-      before,
-      after: updated.toObject(),
+      req, action: "PAYMENT_UPDATED", module: "finance",
+      targetId: updated._id, before, after: updated.toObject(),
     });
 
-    res.json({ success: true, data: updated });
+    // CRM save ho chuka, ab QBO (fail ho to CRM rollback nahi hoga)
+    let qboSync = { attempted: false };
+    if (resyncQbo && updated.qboPaymentId && updated.status === "approved") {
+      qboSync = { attempted: true };
+      try {
+        const invoice = await Invoice.findById(updated.invoice);
+        const user = await User.findById(updated.user);
+        if (!invoice?.qboInvoiceId || !user?.qboCustomerId) {
+          throw new Error("Invoice or customer is not linked to QBO");
+        }
+        await qbo.updateQboPayment({
+          payment: updated,
+          invoice,
+          customerId: user.qboCustomerId,
+          qboInvoiceId: invoice.qboInvoiceId,
+        });
+        updated.qboSyncStatus = "synced";
+        updated.qboLastSyncedAt = new Date();
+        updated.qboSyncError = null;
+        await updated.save();
+        qboSync.success = true;
+      } catch (err) {
+        updated.qboSyncStatus = "failed";
+        updated.qboSyncError = err.message;
+        await updated.save().catch(() => {});
+        qboSync.success = false;
+        qboSync.error = err.message;
+      }
+    }
+
+    res.json({ success: true, data: updated, qboSync });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
