@@ -126,7 +126,8 @@ exports.createEnrollmentDirect = async (req, res) => {
 exports.getMyEnrollments = async (req, res) => {
   try {
     const enrollments = await Enrollment.find({ user: req.user.id })
-      .populate("program batch");
+      .populate("program")
+      .populate("batch", "name mode start_date end_date status date_required")
 
     res.json({
       success: true,
@@ -280,13 +281,22 @@ exports.getAllEnrollments = async (req, res) => {
     const limit = Number(req.query.limit) || 10;
 
     // const { search, status } = req.query;
-    const {search, status, assigned_to, accessStatus} = req.query;
+    const { search, status, assigned_to, accessStatus, mode = "online" } = req.query;
 
     // Step 1: Enrollment level filter (status)
     const enrollmentFilter = {};
     if (status) enrollmentFilter.status = status;
     if (assigned_to) enrollmentFilter.assigned_to = assigned_to;
     if (accessStatus) enrollmentFilter.accessStatus = accessStatus;
+
+    // mode: "online" (default) | "physical" | "all"
+    if (mode !== "all") {
+      const physicalBatchIds = await Batch.find({ mode: "physical" }).distinct("_id");
+      enrollmentFilter.batch =
+        mode === "physical"
+          ? { $in: physicalBatchIds }
+          : { $nin: physicalBatchIds }; // online + bina batch wali (Business in the Box) dono
+    }
 
     // Step 2: Pehle sari matching enrollments fetch karo (populate ke saath)
     // const allEnrollments = await Enrollment.find(enrollmentFilter)
@@ -295,7 +305,7 @@ exports.getAllEnrollments = async (req, res) => {
     const allEnrollments = await Enrollment.find(enrollmentFilter)
       .populate("user", "name email phone role")
       .populate("program")
-      .populate("batch")
+      .populate("batch", "name mode start_date end_date status date_required")
       .populate("assigned_to", "name email role")
       .populate("invoice", "isBundle invoiceNumber")
       .sort({ createdAt: -1 });

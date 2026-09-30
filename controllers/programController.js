@@ -22,6 +22,12 @@ const formatDateRange = (start, end) => {
     return `${sStr} - ${eStr} ${year}`.trim();
 };
 
+// mode: "physical" -> sirf physical | "all" -> dono | baaki sab (empty/undefined) -> online
+const modeFilter = (mode) => {
+    if (mode === "all") return undefined;
+    return mode === "physical" ? "physical" : { $ne: "physical" };
+};
+
 const money = (n) => (n === "" || n === null || n === undefined ? "" : `Rs. ${Number(n).toFixed(2)}`);
 const dateStr = (d) => (d ? new Date(d).toLocaleDateString("en-GB") : "");
 
@@ -46,7 +52,7 @@ async function buildBatchExportData(batch) {
     //     uska apna slice/invoice attach karo ──
     const invoiceByEnrollment = new Map();
 
-        for (const inv of invoices) {
+    for (const inv of invoices) {
         if (inv.isBundle && Array.isArray(inv.items) && inv.items.length > 0) {
             const programItems = inv.items
                 .filter((it) => !it.feeType || it.feeType === "program")
@@ -105,7 +111,7 @@ async function buildBatchExportData(batch) {
     const programName = batch.program_id?.name || "";
     const dateRangeText = formatDateRange(batch.start_date, batch.end_date);
 
-        const studentRows = (batch.students || []).map((student) => {
+    const studentRows = (batch.students || []).map((student) => {
         const enrollmentId = enrollmentByUser.get(student._id.toString());
         const invoice = enrollmentId ? invoiceByEnrollment.get(enrollmentId) : null;
 
@@ -199,7 +205,7 @@ exports.getPrograms = async (req, res) => {
 exports.getProgramsPublic = async (req, res) => {
     try {
         const programs = await Program.find({ status: "active" })
-            .select("_id name category")  
+            .select("_id name category")
             .sort({ createdAt: 1 })
             .lean();
 
@@ -294,6 +300,7 @@ exports.getProgramBatches = async (req, res) => {
         const batches = await Batch.find({
             program_id: program._id,
             status: { $in: ["upcoming", "active"] },
+            mode: { $ne: "physical" },
         })
             .select("-instructor_id")
             .sort({ start_date: 1 });
@@ -801,9 +808,12 @@ exports.adminDeleteLesson = async (req, res) => {
 // GET /admin/v1/batches
 exports.adminGetBatches = async (req, res) => {
     try {
-        const { program_id, status } = req.query;
+        const { program_id, status, mode } = req.query;
 
         const query = {};
+
+        const m = modeFilter(mode);
+        if (m) query.mode = m;
 
         if (program_id) {
             query.program_id = new mongoose.Types.ObjectId(program_id);
@@ -831,7 +841,6 @@ exports.adminGetBatches = async (req, res) => {
 };
 
 // POST /admin/v1/batches
-// POST /admin/v1/batches
 exports.adminCreateBatch = async (req, res) => {
     try {
         const { date_required, start_date } = req.body;
@@ -844,7 +853,11 @@ exports.adminCreateBatch = async (req, res) => {
             });
         }
 
-        const payload = { ...req.body, date_required: isDateRequired };
+        const payload = {
+            ...req.body,
+            date_required: isDateRequired,
+            mode: req.body.mode === "physical" ? "physical" : "online",
+        };
 
         // date_required unchecked hai to dates clear rakho
         if (!isDateRequired) {
@@ -873,7 +886,11 @@ exports.adminUpdateBatch = async (req, res) => {
             });
         }
 
-        const payload = { ...req.body, date_required: isDateRequired };
+        const payload = {
+            ...req.body,
+            date_required: isDateRequired,
+            mode: req.body.mode === "physical" ? "physical" : "online",
+        };
 
         if (!isDateRequired) {
             payload.start_date = null;
@@ -896,41 +913,6 @@ exports.adminUpdateBatch = async (req, res) => {
     }
 };
 
-// PUT /admin/v1/batches/:id
-exports.adminUpdateBatch = async (req, res) => {
-    try {
-        const { date_required, start_date } = req.body;
-        const isDateRequired = date_required !== false;
-
-        if (isDateRequired && !start_date) {
-            return res.status(400).json({
-                success: false,
-                message: "Start date is required when 'Date Required' is checked.",
-            });
-        }
-
-        const payload = { ...req.body, date_required: isDateRequired };
-
-        if (!isDateRequired) {
-            payload.start_date = null;
-            payload.end_date = null;
-        }
-
-        const batch = await Batch.findByIdAndUpdate(
-            req.params.id,
-            payload,
-            { new: true, runValidators: true }
-        );
-
-        if (!batch) {
-            return res.status(404).json({ message: "Batch not found" });
-        }
-
-        res.status(200).json({ success: true, data: batch });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-};
 /* 
 // GET /admin/v1/batches/:id
 exports.adminGetBatchById = async (req, res) => {
@@ -1509,9 +1491,11 @@ exports.adminExportBatchPayments = async (req, res) => {
 exports.adminExportAllBatchesPayments = async (req, res) => {
     try {
         const format = (req.query.format || "xlsx").toLowerCase();
-        const { status, program_id, search } = req.query;
+        const { status, program_id, search, mode } = req.query;
 
         const query = {};
+        const m = modeFilter(mode);
+        if (m) query.mode = m;
         if (program_id) query.program_id = new mongoose.Types.ObjectId(program_id);
         if (status) query.status = status;
         if (search) query.name = { $regex: search, $options: "i" };
@@ -1615,7 +1599,7 @@ exports.adminExportAllBatchesPayments = async (req, res) => {
                 `;
             });
 
-                        const html = `
+            const html = `
                 <!DOCTYPE html><html><head><meta charset="utf-8" /><style>
                     * { box-sizing: border-box; }
                     @page { margin: 24px; }

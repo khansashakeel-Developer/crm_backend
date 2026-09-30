@@ -28,6 +28,11 @@ const batchSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+     mode: {
+      type: String,
+      enum: ["online", "physical"],
+      default: "online",
+    },
     students: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     status: {
       type: String,
