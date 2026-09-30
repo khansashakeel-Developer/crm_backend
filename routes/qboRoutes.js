@@ -28,11 +28,23 @@ async function runQuery(entity, { limit = 100, offset = 0, where = "" } = {}) {
   return data.QueryResponse?.[entity] || [];
 }
 
-// purane / duplicate QBO items → (kis program ka, kaunsi fee)
+// sandbox
+// const QBO_ITEM_ALIASES = {
+//   "25": { programId: "69d8a8ed06f01d73ae725722", feeType: "certificate" }, // Master CPD
+//   "26": { programId: "69d8a8ed06f01d73ae725722", feeType: "manual" },      // Master Manual
+// };
+
+// live
 const QBO_ITEM_ALIASES = {
-  "25": { programId: "69d8a8ed06f01d73ae725722", feeType: "certificate" }, // Master CPD
-  "26": { programId: "69d8a8ed06f01d73ae725722", feeType: "manual" },      // Master Manual
+  "60": { programId: "69d8a8ed06f01d73ae725722", feeType: "certificate" }, // Master CPD
+  "62": { programId: "69d8a8ed06f01d73ae725722", feeType: "manual" },      // Master Manual
 };
+
+// live QBO me purani/duplicate items jo Program.qboItemId se match nahi karti
+// const QBO_ITEM_ALIASES = {
+//   "1010000011": { programId: "69d88bcd3b3f401bb2e711bc", feeType: "program" }, // NLP Practitioner
+//   "1010000021": { programId: "69d8a8ed06f01d73ae725722", feeType: "program" }, // NLP Master Practitioner
+// };
 
 async function resolveLineProgram(line, session, preferProgramIds = []) {
   const itemRef = line.SalesItemLineDetail?.ItemRef;
@@ -45,6 +57,7 @@ async function resolveLineProgram(line, session, preferProgramIds = []) {
     let aq = Program.findById(alias.programId).select("_id name qboItemId qboCertificateItemId qboManualItemId");
     if (session) aq = aq.session(session);
     const aliased = await aq.lean();
+    console.log("ALIAS", itemId, alias.programId, "->", aliased ? aliased.name : "NOT FOUND");
     if (aliased) return { program: aliased, feeType: alias.feeType };
   }
 
@@ -678,63 +691,398 @@ router.get("/detail/:qboInvoiceId", protect, authorize(...ROLES), async (req, re
 //     session.endSession();
 //   }
 // });
+// router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
+//   const session = await mongoose.startSession();
+//   session.startTransaction();
+
+//   try {
+
+//     const { qboInvoiceId, userId, enrollmentIds, paymentConfig = {} } = req.body;
+//     if (!qboInvoiceId || !userId) {
+//       await session.abortTransaction();
+//       return res.status(400).json({ success: false, message: "qboInvoiceId and userId are required" });
+//     }
+//     const ids = (Array.isArray(enrollmentIds) ? enrollmentIds : enrollmentIds ? [enrollmentIds] : []).filter(Boolean);
+
+//     const user = await User.findById(userId).session(session);
+//     if (!user) {
+//       await session.abortTransaction();
+//       return res.status(404).json({ success: false, message: "CRM user not found" });
+//     }
+
+//     const already = await Invoice.findOne({ qboInvoiceId }).session(session);
+//     if (already) {
+//       await session.abortTransaction();
+//       return res.status(400).json({ success: false, message: `Already imported as CRM invoice #${already.invoiceNumber}` });
+//     }
+
+//     const invData = await qbo.qboRequest("GET", `/invoice/${qboInvoiceId}`);
+//     const qboInvoice = invData.Invoice;
+//     if (!qboInvoice) {
+//       await session.abortTransaction();
+//       return res.status(404).json({ success: false, message: "QBO invoice not found" });
+//     }
+
+//     const numberTaken = await Invoice.findOne({ invoiceNumber: qboInvoice.DocNumber }).session(session);
+//     if (numberTaken) {
+//       await session.abortTransaction();
+//       return res.status(400).json({
+//         success: false,
+//         message: `Invoice number ${qboInvoice.DocNumber} already exists in CRM — link it manually instead of importing`,
+//       });
+//     }
+
+//     const grossLines = (qboInvoice.Line || []).filter((l) => l.DetailType === "SalesItemLineDetail");
+//     const discountLines = (qboInvoice.Line || []).filter((l) => l.DetailType === "DiscountLineDetail");
+//     const totalAmount = grossLines.reduce((s, l) => s + Number(l.Amount || 0), 0);
+//     const discountAmount = discountLines.reduce((s, l) => s + Number(l.Amount || 0), 0);
+//     const netAmount = Math.max(0, totalAmount - discountAmount);
+
+//     // payments invoice banane se PEHLE fetch, taake installments invoice.create() ke waqt hi ban jayen
+//     const custId = qboInvoice.CustomerRef?.value;
+//     const qboPayments = custId ? await fetchAllQbo("Payment", `CustomerRef = '${custId}'`) : [];
+//     const linkedPayments = qboPayments
+//       .filter((p) =>
+//         (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId))
+//       )
+//       .sort(byDateThenId);
+
+//     const isBundle = ids.length > 1;
+//     let invoiceDoc = {
+//       invoiceNumber: qboInvoice.DocNumber,
+//       user: userId,
+//       totalAmount,
+//       discountAmount,
+//       remainingAmount: netAmount,
+//       paidAmount: 0,
+//       status: "PENDING",
+//       issueDate: qboInvoice.TxnDate ? new Date(qboInvoice.TxnDate) : new Date(),
+//       dueDate: qboInvoice.DueDate ? new Date(qboInvoice.DueDate) : undefined,
+//       qboInvoiceId: qboInvoice.Id,
+//       qboSyncStatus: "synced",
+//       qboLastSyncedAt: new Date(),
+//     };
+
+//     // ── selected enrollments → program maps (bundle items + CPD/Manual program ke liye) ──
+//     const requestedEnrollments = ids.length
+//       ? await Enrollment.find({ _id: { $in: ids } }).select("program").session(session).lean()
+//       : [];
+//     const enrollmentByProgramId = new Map(
+//       requestedEnrollments.map((e) => [String(e.program), e._id])
+//     );
+//     const programDocs = requestedEnrollments.length
+//       ? await Program.find({ _id: { $in: requestedEnrollments.map((e) => e.program) } })
+//         .select("name")
+//         .session(session)
+//         .lean()
+//       : [];
+//     const programNameById = new Map(programDocs.map((p) => [String(p._id), p.name]));
+
+
+
+//     if (isBundle) {
+//       const items = [];
+//       const unmatchedInfo = [];
+
+//       const preferIds = [...enrollmentByProgramId.keys()];
+
+//       for (const l of grossLines) {
+//         const { program, feeType } = await resolveLineProgram(l, session, preferIds);
+//         const enrollmentId = program ? enrollmentByProgramId.get(String(program._id)) : undefined;
+
+//         const item = {
+//           program: program?._id || undefined,
+//           programName: program?.name || l.Description || l.SalesItemLineDetail?.ItemRef?.name || "Program Fee",
+//           enrollment: enrollmentId || undefined,
+//           amount: Number(l.Amount || 0),
+//           discount: 0,
+//           feeType,
+//         };
+//         if (feeType === "program") items.push(item);
+
+//         if (!program) {
+//           unmatchedInfo.push({ programName: item.programName, amount: item.amount, reason: "QBO item kisi Program se linked nahi", qboItemId: l.SalesItemLineDetail?.ItemRef?.value, qboItemName: l.SalesItemLineDetail?.ItemRef?.name });
+//         } else if (!enrollmentId) {
+//           unmatchedInfo.push({ programName: program.name, amount: item.amount, reason: "Is program ki enrollment select nahi ki" });
+//         }
+//       }
+
+//       if (unmatchedInfo.length) {
+//         await session.abortTransaction();
+//         return res.status(400).json({
+//           success: false,
+//           message: `${unmatchedInfo.length} line item(s) could not be matched to a program/enrollment.`,
+//           unmatchedItems: unmatchedInfo,
+//         });
+//       }
+
+//       invoiceDoc = {
+//         ...invoiceDoc,
+//         isBundle: true,
+//         enrollment: ids[0],
+//         enrollments: ids,
+//         items,
+//       };
+//     } else if (ids.length === 1) {
+//       invoiceDoc.enrollment = ids[0];
+//     }
+
+//     // ── Har payment ka type: advance / installment / certificate / manual ──
+//     const TYPES = ["advance", "installment", "certificate", "manual"];
+//     const FEE_LABEL = { certificate: "CPD / Certificate Fee", manual: "Manual Fee" };
+
+//     let advanceUsed = false;
+//     let installmentNo = 0;
+//     let totalPaid = 0;
+//     const plan = [];
+//     const missingProgram = [];
+
+//     linkedPayments.forEach((qp, idx) => {
+//       const cfg = paymentConfig[qp.Id] || {};
+
+//       // default: pehli payment = advance, baaqi = installment
+//       let type = TYPES.includes(cfg.type) ? cfg.type : idx === 0 ? "advance" : "installment";
+
+//       // advance sirf ek hi ho sakta hai
+//       if (type === "advance") {
+//         if (advanceUsed) type = "installment";
+//         else advanceUsed = true;
+//       }
+
+//       // CPD / Manual ke liye program zaroori hai
+//       let programId = null;
+//       if (type === "certificate" || type === "manual") {
+//         if (cfg.programId && enrollmentByProgramId.has(String(cfg.programId))) {
+//           programId = String(cfg.programId);
+//         } else if (enrollmentByProgramId.size === 1) {
+//           programId = [...enrollmentByProgramId.keys()][0]; // single: khud select
+//         } else {
+//           missingProgram.push(qp.Id);
+//         }
+//       }
+
+//       // auto label
+//       let label;
+//       if (type === "advance") label = "Advance Payment";
+//       else if (type === "installment") label = `Installment ${++installmentNo}`;
+//       else {
+//         label = FEE_LABEL[type];
+//         if (isBundle && programId) label += ` — ${programNameById.get(programId) || "Program"}`;
+//       }
+
+//       // admin ne apna label likha ho to wahi use hoga (sirf display, feeType type se set hota hai)
+//       const customLabel = typeof cfg.label === "string" ? cfg.label.trim().slice(0, 100) : "";
+//       if (customLabel) label = customLabel;
+
+//       const amount = Number(qp.TotalAmt || 0);
+//       totalPaid += amount;
+//       plan.push({ qp, type, label, amount, programId });
+//     });
+
+//     if (missingProgram.length) {
+//       await session.abortTransaction();
+//       return res.status(400).json({
+//         success: false,
+//         message: "CPD / Manual payment ke liye program select karein",
+//       });
+//     }
+
+//     const installmentDocs = plan.map(({ qp, type, label, amount, programId }) => ({
+//       label,
+//       amount,
+//       dueDate: qp.TxnDate ? new Date(qp.TxnDate) : null,
+//       paidAmount: amount,
+//       paidAt: qp.TxnDate ? new Date(qp.TxnDate) : new Date(),
+//       status: "PAID",
+//       isAdvance: type === "advance",
+//       feeType: type === "certificate" ? "certificate" : type === "manual" ? "manual" : "program",
+//       program: programId || undefined, // ⚠️ Invoice installments schema mein `program` field hona chahiye
+//       method: "manual",
+//       referenceNumber: qp.PaymentRefNum || null,
+//       notes: qp.PrivateNote || `Imported from QuickBooks${qp.PaymentRefNum ? ` — Ref# ${qp.PaymentRefNum}` : ""}`,
+//     }));
+
+//     invoiceDoc.installments = installmentDocs;
+
+//     const invoiceArr = await Invoice.create([invoiceDoc], { session });
+//     const invoice = invoiceArr[0];
+
+//     if (isBundle) {
+//       await Enrollment.updateMany({ _id: { $in: ids } }, { invoice: invoice._id }, { session });
+//     }
+
+//     // ── Har QBO payment ke liye actual Payment document + installment.paymentId link ──
+//     const importedPayments = [];
+//     for (let i = 0; i < linkedPayments.length; i++) {
+//       const qp = linkedPayments[i];
+//       const amount = Number(qp.TotalAmt || 0);
+
+//       // QBO payment ke sath slip/attachment ho to fetch karo
+//       let receiptUrl = null;
+//       let receiptPublicId = null;
+//       try {
+//         const attachments = await qbo.getQboAttachmentsForEntity(qp.Id, "Payment");
+//         if (attachments.length > 0) {
+//           const att = attachments[0]; // multiple hon to pehli
+//           const fileBuffer = await qbo.downloadQboAttachment(att);
+
+//           // apna existing Cloudinary upload helper yahan use karo
+//           const uploaded = await uploadBufferToCloudinary(fileBuffer, {
+//             filename: att.FileName || `qbo-payment-${qp.Id}`,
+//             folder: "payment-slips",
+//           });
+//           receiptUrl = uploaded.secure_url;
+//           receiptPublicId = uploaded.public_id;
+//         }
+//       } catch (attErr) {
+//         console.error(`QBO attachment fetch failed for payment ${qp.Id}:`, attErr.message);
+//         // attachment fail ho to bhi payment import na roke — bas slip missing rahegi
+//       }
+
+//       // CPD/Manual payment usi program ki enrollment se jaye (bundle mein zaroori)
+//       const paymentEnrollment =
+//         (plan[i].programId && enrollmentByProgramId.get(plan[i].programId)) || ids[0] || undefined;
+
+//       const paymentArr = await Payment.create([{
+//         invoice: invoice._id,
+//         enrollment: paymentEnrollment,
+//         user: userId,
+//         amount,
+//         method: "manual",
+//         status: "approved",
+//         approvedBy: req.user._id,
+//         approvedAt: new Date(),
+//         receivedBy: req.user._id,
+//         paidAt: qp.TxnDate ? new Date(qp.TxnDate) : new Date(),
+//         referenceNumber: qp.PaymentRefNum || null,
+//         notes: qp.PrivateNote || `Imported from QuickBooks ${qp.PaymentRefNum ? ` — Ref# ${qp.PaymentRefNum}` : ""}`,
+//         qboPaymentId: qp.Id,
+//         qboSyncStatus: "synced",
+//         qboLastSyncedAt: new Date(),
+//         receiptUrl,
+//         receiptPublicId,
+//       }], { session });
+//       importedPayments.push(paymentArr[0]);
+
+//       invoice.installments[i].paymentId = paymentArr[0]._id;
+//       invoice.installments[i].receiptUrl = receiptUrl;
+//       invoice.installments[i].receiptPublicId = receiptPublicId;
+//     }
+
+//     invoice.paidAmount = totalPaid;
+//     invoice.remainingAmount = Math.max(0, netAmount - totalPaid);
+//     invoice.status = invoice.remainingAmount === 0 && totalPaid > 0 ? "PAID" : totalPaid > 0 ? "PARTIAL" : "PENDING";
+//     await invoice.save({ session });
+
+//     if (!user.qboCustomerId && custId) {
+//       user.qboCustomerId = custId;
+//       user.qboSyncStatus = "synced";
+//       user.qboLastSyncedAt = new Date();
+//       await user.save({ validateBeforeSave: false, session });
+//     }
+
+//     // invoice-level journal
+//     await postInvoiceJournal({
+//       amount: totalAmount,
+//       discountAmount,
+//       invoiceId: invoice._id,
+//       userId: req.user._id,
+//       description: `Invoice ${invoice.invoiceNumber} - (Imported from QuickBooks)`,
+//       date: invoice.issueDate,
+//       session,
+//     });
+
+//     // har imported payment ki apni journal entry
+//     for (const payment of importedPayments) {
+//       await postPaymentJournal({
+//         amount: payment.amount,
+//         paymentId: payment._id,
+//         invoiceId: invoice._id,
+//         userId: req.user._id,
+//         description: `${payment.notes} ${invoice.invoiceNumber} - (Imported from QuickBooks)`,
+//         date: payment.paidAt,
+//         method: payment.method,
+//         session,
+//       });
+//     }
+
+//     await logAudit({
+//       req, action: "INVOICE_IMPORTED_FROM_QBO", module: "finance",
+//       targetId: invoice._id, after: invoice.toObject(),
+//     });
+
+//     await session.commitTransaction();
+
+//     res.status(201).json({
+//       success: true,
+//       message: `Imported invoice #${invoice.invoiceNumber}${isBundle ? " (bundle)" : ""} with ${importedPayments.length} payment(s), all linked to QBO`,
+//       data: { invoice, paymentsImported: importedPayments.length },
+//     });
+//   } catch (err) {
+//     await session.abortTransaction();
+//     res.status(500).json({ success: false, message: err.message });
+//   } finally {
+//     session.endSession();
+//   }
+// });
 router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
-  try {
+  const fail = async (code, message, extra = {}) => {
+    await session.abortTransaction();
+    return res.status(code).json({ success: false, message, ...extra });
+  };
 
+  try {
     const { qboInvoiceId, userId, enrollmentIds, paymentConfig = {} } = req.body;
-    if (!qboInvoiceId || !userId) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, message: "qboInvoiceId and userId are required" });
-    }
+    if (!qboInvoiceId || !userId) return fail(400, "qboInvoiceId and userId are required");
+
     const ids = (Array.isArray(enrollmentIds) ? enrollmentIds : enrollmentIds ? [enrollmentIds] : []).filter(Boolean);
 
     const user = await User.findById(userId).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      return res.status(404).json({ success: false, message: "CRM user not found" });
-    }
+    if (!user) return fail(404, "CRM user not found");
 
     const already = await Invoice.findOne({ qboInvoiceId }).session(session);
-    if (already) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, message: `Already imported as CRM invoice #${already.invoiceNumber}` });
-    }
+    if (already) return fail(400, `Already imported as CRM invoice #${already.invoiceNumber}`);
 
     const invData = await qbo.qboRequest("GET", `/invoice/${qboInvoiceId}`);
     const qboInvoice = invData.Invoice;
-    if (!qboInvoice) {
-      await session.abortTransaction();
-      return res.status(404).json({ success: false, message: "QBO invoice not found" });
-    }
+    if (!qboInvoice) return fail(404, "QBO invoice not found");
 
     const numberTaken = await Invoice.findOne({ invoiceNumber: qboInvoice.DocNumber }).session(session);
     if (numberTaken) {
-      await session.abortTransaction();
-      return res.status(400).json({
-        success: false,
-        message: `Invoice number ${qboInvoice.DocNumber} already exists in CRM — link it manually instead of importing`,
-      });
+      return fail(400, `Invoice number ${qboInvoice.DocNumber} already exists in CRM — link it manually instead of importing`);
     }
 
-    const grossLines = (qboInvoice.Line || []).filter((l) => l.DetailType === "SalesItemLineDetail");
-    const discountLines = (qboInvoice.Line || []).filter((l) => l.DetailType === "DiscountLineDetail");
+    // ── amounts (discount QBO ki DiscountLineDetail lines se; account id import me matter nahi karta) ──
+    const lines = qboInvoice.Line || [];
+    const grossLines = lines.filter((l) => l.DetailType === "SalesItemLineDetail");
+    const discountLines = lines.filter((l) => l.DetailType === "DiscountLineDetail");
     const totalAmount = grossLines.reduce((s, l) => s + Number(l.Amount || 0), 0);
     const discountAmount = discountLines.reduce((s, l) => s + Number(l.Amount || 0), 0);
     const netAmount = Math.max(0, totalAmount - discountAmount);
 
-    // payments invoice banane se PEHLE fetch, taake installments invoice.create() ke waqt hi ban jayen
+    // ── linked QBO payments (date order) ──
     const custId = qboInvoice.CustomerRef?.value;
     const qboPayments = custId ? await fetchAllQbo("Payment", `CustomerRef = '${custId}'`) : [];
     const linkedPayments = qboPayments
-      .filter((p) =>
-        (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId))
-      )
+      .filter((p) => (p.Line || []).some((l) => (l.LinkedTxn || []).some((lt) => lt.TxnId === qboInvoiceId)))
       .sort(byDateThenId);
 
+    // ── selected enrollments → maps ──
+    const requestedEnrollments = ids.length
+      ? await Enrollment.find({ _id: { $in: ids } }).select("program").session(session).lean()
+      : [];
+    const enrollmentByProgramId = new Map(requestedEnrollments.map((e) => [String(e.program), e._id]));
+    const programDocs = requestedEnrollments.length
+      ? await Program.find({ _id: { $in: requestedEnrollments.map((e) => e.program) } }).select("name").session(session).lean()
+      : [];
+    const programNameById = new Map(programDocs.map((p) => [String(p._id), p.name]));
+
     const isBundle = ids.length > 1;
+    const importWarnings = [];
+
     let invoiceDoc = {
       invoiceNumber: qboInvoice.DocNumber,
       user: userId,
@@ -750,71 +1098,43 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
       qboLastSyncedAt: new Date(),
     };
 
-    // ── selected enrollments → program maps (bundle items + CPD/Manual program ke liye) ──
-    const requestedEnrollments = ids.length
-      ? await Enrollment.find({ _id: { $in: ids } }).select("program").session(session).lean()
-      : [];
-    const enrollmentByProgramId = new Map(
-      requestedEnrollments.map((e) => [String(e.program), e._id])
-    );
-    const programDocs = requestedEnrollments.length
-      ? await Program.find({ _id: { $in: requestedEnrollments.map((e) => e.program) } })
-        .select("name")
-        .session(session)
-        .lean()
-      : [];
-    const programNameById = new Map(programDocs.map((p) => [String(p._id), p.name]));
-
-
-
+    // ── bundle items: unmatched pe abort nahi, sirf warning ──
     if (isBundle) {
       const items = [];
-      const unmatchedInfo = [];
-
       const preferIds = [...enrollmentByProgramId.keys()];
 
       for (const l of grossLines) {
         const { program, feeType } = await resolveLineProgram(l, session, preferIds);
-        const enrollmentId = program ? enrollmentByProgramId.get(String(program._id)) : undefined;
+        if (feeType !== "program") continue; // CPD/Manual items array me nahi jate (installments se handle hote hain)
 
-        const item = {
+        const enrollmentId = program ? enrollmentByProgramId.get(String(program._id)) : undefined;
+        const itemRef = l.SalesItemLineDetail?.ItemRef;
+
+        items.push({
           program: program?._id || undefined,
-          programName: program?.name || l.Description || l.SalesItemLineDetail?.ItemRef?.name || "Program Fee",
+          programName: program?.name || itemRef?.name || l.Description || "Program Fee",
           enrollment: enrollmentId || undefined,
           amount: Number(l.Amount || 0),
-          discount: 0,
-          feeType,
-        };
-        if (feeType === "program") items.push(item);
+          discount: 0, // discount invoice.discountAmount me hai
+          feeType: "program",
+        });
 
-        if (!program) {
-          unmatchedInfo.push({ programName: item.programName, amount: item.amount, reason: "QBO item kisi Program se linked nahi", qboItemId: l.SalesItemLineDetail?.ItemRef?.value, qboItemName: l.SalesItemLineDetail?.ItemRef?.name });
-        } else if (!enrollmentId) {
-          unmatchedInfo.push({ programName: program.name, amount: item.amount, reason: "Is program ki enrollment select nahi ki" });
+        if (!program || !enrollmentId) {
+          importWarnings.push({
+            qboItemId: itemRef?.value,
+            qboItemName: itemRef?.name,
+            amount: Number(l.Amount || 0),
+            reason: !program ? "QBO item kisi Program se linked nahi" : "Is program ki enrollment select nahi ki",
+          });
         }
       }
 
-      if (unmatchedInfo.length) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `${unmatchedInfo.length} line item(s) could not be matched to a program/enrollment.`,
-          unmatchedItems: unmatchedInfo,
-        });
-      }
-
-      invoiceDoc = {
-        ...invoiceDoc,
-        isBundle: true,
-        enrollment: ids[0],
-        enrollments: ids,
-        items,
-      };
+      invoiceDoc = { ...invoiceDoc, isBundle: true, enrollment: ids[0], enrollments: ids, items };
     } else if (ids.length === 1) {
       invoiceDoc.enrollment = ids[0];
     }
 
-    // ── Har payment ka type: advance / installment / certificate / manual ──
+    // ── payment plan: advance / installment / certificate / manual ──
     const TYPES = ["advance", "installment", "certificate", "manual"];
     const FEE_LABEL = { certificate: "CPD / Certificate Fee", manual: "Manual Fee" };
 
@@ -826,29 +1146,20 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
 
     linkedPayments.forEach((qp, idx) => {
       const cfg = paymentConfig[qp.Id] || {};
-
-      // default: pehli payment = advance, baaqi = installment
       let type = TYPES.includes(cfg.type) ? cfg.type : idx === 0 ? "advance" : "installment";
 
-      // advance sirf ek hi ho sakta hai
       if (type === "advance") {
         if (advanceUsed) type = "installment";
         else advanceUsed = true;
       }
 
-      // CPD / Manual ke liye program zaroori hai
       let programId = null;
       if (type === "certificate" || type === "manual") {
-        if (cfg.programId && enrollmentByProgramId.has(String(cfg.programId))) {
-          programId = String(cfg.programId);
-        } else if (enrollmentByProgramId.size === 1) {
-          programId = [...enrollmentByProgramId.keys()][0]; // single: khud select
-        } else {
-          missingProgram.push(qp.Id);
-        }
+        if (cfg.programId && enrollmentByProgramId.has(String(cfg.programId))) programId = String(cfg.programId);
+        else if (enrollmentByProgramId.size === 1) programId = [...enrollmentByProgramId.keys()][0];
+        else missingProgram.push(qp.Id);
       }
 
-      // auto label
       let label;
       if (type === "advance") label = "Advance Payment";
       else if (type === "installment") label = `Installment ${++installmentNo}`;
@@ -857,7 +1168,6 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
         if (isBundle && programId) label += ` — ${programNameById.get(programId) || "Program"}`;
       }
 
-      // admin ne apna label likha ho to wahi use hoga (sirf display, feeType type se set hota hai)
       const customLabel = typeof cfg.label === "string" ? cfg.label.trim().slice(0, 100) : "";
       if (customLabel) label = customLabel;
 
@@ -866,15 +1176,9 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
       plan.push({ qp, type, label, amount, programId });
     });
 
-    if (missingProgram.length) {
-      await session.abortTransaction();
-      return res.status(400).json({
-        success: false,
-        message: "CPD / Manual payment ke liye program select karein",
-      });
-    }
+    if (missingProgram.length) return fail(400, "CPD / Manual payment ke liye program select karein");
 
-    const installmentDocs = plan.map(({ qp, type, label, amount, programId }) => ({
+    invoiceDoc.installments = plan.map(({ qp, type, label, amount, programId }) => ({
       label,
       amount,
       dueDate: qp.TxnDate ? new Date(qp.TxnDate) : null,
@@ -883,37 +1187,31 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
       status: "PAID",
       isAdvance: type === "advance",
       feeType: type === "certificate" ? "certificate" : type === "manual" ? "manual" : "program",
-      program: programId || undefined, // ⚠️ Invoice installments schema mein `program` field hona chahiye
+      program: programId || undefined,
       method: "manual",
       referenceNumber: qp.PaymentRefNum || null,
       notes: qp.PrivateNote || `Imported from QuickBooks${qp.PaymentRefNum ? ` — Ref# ${qp.PaymentRefNum}` : ""}`,
     }));
 
-    invoiceDoc.installments = installmentDocs;
-
-    const invoiceArr = await Invoice.create([invoiceDoc], { session });
-    const invoice = invoiceArr[0];
+    const [invoice] = await Invoice.create([invoiceDoc], { session });
 
     if (isBundle) {
       await Enrollment.updateMany({ _id: { $in: ids } }, { invoice: invoice._id }, { session });
     }
 
-    // ── Har QBO payment ke liye actual Payment document + installment.paymentId link ──
+    // ── Payment docs + slips ──
     const importedPayments = [];
     for (let i = 0; i < linkedPayments.length; i++) {
       const qp = linkedPayments[i];
       const amount = Number(qp.TotalAmt || 0);
 
-      // QBO payment ke sath slip/attachment ho to fetch karo
       let receiptUrl = null;
       let receiptPublicId = null;
       try {
         const attachments = await qbo.getQboAttachmentsForEntity(qp.Id, "Payment");
         if (attachments.length > 0) {
-          const att = attachments[0]; // multiple hon to pehli
+          const att = attachments[0];
           const fileBuffer = await qbo.downloadQboAttachment(att);
-
-          // apna existing Cloudinary upload helper yahan use karo
           const uploaded = await uploadBufferToCloudinary(fileBuffer, {
             filename: att.FileName || `qbo-payment-${qp.Id}`,
             folder: "payment-slips",
@@ -923,14 +1221,12 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
         }
       } catch (attErr) {
         console.error(`QBO attachment fetch failed for payment ${qp.Id}:`, attErr.message);
-        // attachment fail ho to bhi payment import na roke — bas slip missing rahegi
       }
 
-      // CPD/Manual payment usi program ki enrollment se jaye (bundle mein zaroori)
       const paymentEnrollment =
         (plan[i].programId && enrollmentByProgramId.get(plan[i].programId)) || ids[0] || undefined;
 
-      const paymentArr = await Payment.create([{
+      const [payment] = await Payment.create([{
         invoice: invoice._id,
         enrollment: paymentEnrollment,
         user: userId,
@@ -942,23 +1238,24 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
         receivedBy: req.user._id,
         paidAt: qp.TxnDate ? new Date(qp.TxnDate) : new Date(),
         referenceNumber: qp.PaymentRefNum || null,
-        notes: qp.PrivateNote || `Imported from QuickBooks ${qp.PaymentRefNum ? ` — Ref# ${qp.PaymentRefNum}` : ""}`,
+        notes: qp.PrivateNote || `Imported from QuickBooks${qp.PaymentRefNum ? ` — Ref# ${qp.PaymentRefNum}` : ""}`,
         qboPaymentId: qp.Id,
         qboSyncStatus: "synced",
         qboLastSyncedAt: new Date(),
         receiptUrl,
         receiptPublicId,
       }], { session });
-      importedPayments.push(paymentArr[0]);
 
-      invoice.installments[i].paymentId = paymentArr[0]._id;
+      importedPayments.push(payment);
+      invoice.installments[i].paymentId = payment._id;
       invoice.installments[i].receiptUrl = receiptUrl;
       invoice.installments[i].receiptPublicId = receiptPublicId;
     }
 
     invoice.paidAmount = totalPaid;
     invoice.remainingAmount = Math.max(0, netAmount - totalPaid);
-    invoice.status = invoice.remainingAmount === 0 && totalPaid > 0 ? "PAID" : totalPaid > 0 ? "PARTIAL" : "PENDING";
+    invoice.status =
+      invoice.remainingAmount === 0 && totalPaid > 0 ? "PAID" : totalPaid > 0 ? "PARTIAL" : "PENDING";
     await invoice.save({ session });
 
     if (!user.qboCustomerId && custId) {
@@ -968,7 +1265,7 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
       await user.save({ validateBeforeSave: false, session });
     }
 
-    // invoice-level journal
+    // ── journals ──
     await postInvoiceJournal({
       amount: totalAmount,
       discountAmount,
@@ -979,16 +1276,15 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
       session,
     });
 
-    // har imported payment ki apni journal entry
-    for (const payment of importedPayments) {
+    for (const p of importedPayments) {
       await postPaymentJournal({
-        amount: payment.amount,
-        paymentId: payment._id,
+        amount: p.amount,
+        paymentId: p._id,
         invoiceId: invoice._id,
         userId: req.user._id,
-        description: `${payment.notes} ${invoice.invoiceNumber} - (Imported from QuickBooks)`,
-        date: payment.paidAt,
-        method: payment.method,
+        description: `${p.notes} ${invoice.invoiceNumber} - (Imported from QuickBooks)`,
+        date: p.paidAt,
+        method: p.method,
         session,
       });
     }
@@ -1003,7 +1299,7 @@ router.post("/invoice", protect, authorize(...ROLES), async (req, res) => {
     res.status(201).json({
       success: true,
       message: `Imported invoice #${invoice.invoiceNumber}${isBundle ? " (bundle)" : ""} with ${importedPayments.length} payment(s), all linked to QBO`,
-      data: { invoice, paymentsImported: importedPayments.length },
+      data: { invoice, paymentsImported: importedPayments.length, warnings: importWarnings },
     });
   } catch (err) {
     await session.abortTransaction();

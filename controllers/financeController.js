@@ -1216,7 +1216,7 @@ exports.markInstallmentPaid = async (req, res) => {
       message: "Installment marked as paid",
       data: invoice,
     });
-    } catch (err) {
+  } catch (err) {
     await session.abortTransaction();
     console.error("markInstallmentPaid error:", err);
     return res.status(500).json({ success: false, message: err.message });
@@ -1668,7 +1668,7 @@ exports.editPaidInstallment = async (req, res) => {
 
   try {
     const { invoiceId, installmentId } = req.params;
-    const { amount, paidDate, method, referenceNumber, notes, reason, adjustTotal } = req.body;
+    const { amount, paidDate, method, referenceNumber, notes, reason, adjustTotal, syncQbo } = req.body;
 
     if (!reason) {
       await session.abortTransaction();
@@ -1792,10 +1792,55 @@ exports.editPaidInstallment = async (req, res) => {
 
     await session.commitTransaction();
 
+    // ── QBO sync: sirf jab user ne checkbox tick kiya ho (CRM correction rollback nahi hogi) ──
+    let qboSync = { status: "not_requested" };
+
+    if (syncQbo) {
+      if (!payment.qboPaymentId) {
+        qboSync = { status: "skipped", message: "Payment QBO se linked nahi hai" };
+      } else {
+        try {
+          const freshInvoice = await Invoice.findById(invoice._id);
+          const freshPayment = await Payment.findById(payment._id);
+          const qboUser = await User.findById(freshInvoice.user);
+
+          if (!freshInvoice.qboInvoiceId || !qboUser?.qboCustomerId) {
+            throw new Error("Invoice ya customer QBO se linked nahi");
+          }
+
+          // fee reassess hui to pehle invoice lines update karo
+          if (shouldAdjustTotal && isExtraFee && diff !== 0) {
+            await qbo.syncInvoice(freshInvoice, qboUser);
+          }
+
+          await qbo.updateQboPayment({
+            payment: freshPayment,
+            invoice: freshInvoice,
+            customerId: qboUser.qboCustomerId,
+            qboInvoiceId: freshInvoice.qboInvoiceId,
+          });
+
+          await Payment.updateOne(
+            { _id: payment._id },
+            { qboSyncStatus: "synced", qboSyncError: null, qboLastSyncedAt: new Date() }
+          );
+          qboSync = { status: "synced" };
+        } catch (qboErr) {
+          console.error("editPaidInstallment QBO sync failed:", qboErr.message);
+          await Payment.updateOne(
+            { _id: payment._id },
+            { qboSyncStatus: "failed", qboSyncError: `Correction sync failed: ${qboErr.message}` }
+          );
+          qboSync = { status: "failed", message: qboErr.message };
+        }
+      }
+    }
+
     return res.json({
       success: true,
       message: `Payment corrected — Rs ${oldAmount} reversed, Rs ${newAmount} reposted with accurate date`,
       data: invoice,
+      qboSync,
     });
   } catch (err) {
     await session.abortTransaction();
@@ -2451,7 +2496,7 @@ exports.getAllPayments = async (req, res) => {
     if (method) filter.method = method;
     if (userId) filter.user = userId;
 
-        // search by Student name/email/phone/invoice number
+    // search by Student name/email/phone/invoice number
     if (search) {
       const searchRegex = { $regex: search, $options: "i" };
 
@@ -2689,7 +2734,7 @@ exports.updatePayment = async (req, res) => {
       } catch (err) {
         updated.qboSyncStatus = "failed";
         updated.qboSyncError = err.message;
-        await updated.save().catch(() => {});
+        await updated.save().catch(() => { });
         qboSync.success = false;
         qboSync.error = err.message;
       }

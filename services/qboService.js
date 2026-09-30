@@ -1333,22 +1333,27 @@ async function updateQboPayment({ payment, invoice, customerId, qboInvoiceId }, 
 
   const refNum = String(payment.referenceNumber || "").slice(0, 21); // QBO limit
 
+  const txnDate = payment.paidAt
+    ? new Date(payment.paidAt).toISOString().slice(0, 10)
+    : existing.TxnDate;
+
   const payload = {
     Id: existing.Id,
     SyncToken: existing.SyncToken,
     sparse: true,
     CustomerRef: existing.CustomerRef || { value: customerId },
     TotalAmt: Number(payment.amount),
+    TxnDate: txnDate, // ✅ ye missing tha
     PaymentRefNum: refNum,
-    // findDuplicatePayment isi "CRM Payment ID" par depend karta hai, isay na hatayein
     PrivateNote: `${payment.notes || "Payment"} | Invoice ${invoice.invoiceNumber} | CRM Payment ID: ${payment._id}`,
-    // amount badle to Line bhi update karni parti hai
     Line: [{
       Amount: Number(payment.amount),
       LinkedTxn: [{ TxnId: qboInvoiceId, TxnType: "Invoice" }],
     }],
   };
   if (depositAccountId) payload.DepositToAccountRef = { value: depositAccountId };
+
+  console.log(`[QBO] updateQboPayment ${existing.Id}: TxnDate ${existing.TxnDate} -> ${txnDate}`);
 
   const data = await qboRequest("POST", "/payment?minorversion=65", payload, options);
   return data.Payment || data;
