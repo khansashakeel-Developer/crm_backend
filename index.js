@@ -54,6 +54,7 @@ const allowedOrigins = [
   "https://app.arslanlarik.com",
   "https://www.arslanlarik.com",
   "https://portal.arslanlarik.com",
+  "https://alco-website-v2.vercel.app",
 ];
 
 // app.use(
