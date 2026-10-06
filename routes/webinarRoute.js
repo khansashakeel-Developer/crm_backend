@@ -11,6 +11,7 @@ const {
   getWebinarRegistrations,
   // assignWebinar,
   getPublicWebinar,
+  getNextFreeWeeklyWebinar,
   registerForWebinar,
   duplicateWebinar
 } = require('../controllers/webinarsController.js');
@@ -27,6 +28,7 @@ router.get('/:id/registrations', protect, authorize('admin', 'super_admin', "sal
 router.post('/:id/duplicate', protect, authorize('admin', 'super_admin'), duplicateWebinar);
 
 // ---------- PUBLIC ROUTES ----------
+router.get('/public/free-weekly/next', getNextFreeWeeklyWebinar);
 router.get('/public/:id', getPublicWebinar);
 router.post('/public/:id/register', registerForWebinar);
 

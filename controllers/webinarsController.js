@@ -71,6 +71,21 @@ exports.getWebinarRegistrations = async (req, res) => {
 
 // ---------- PUBLIC ----------
 
+// Public: the next published webinar (used by the website's free-webinar form and announcement window).
+// GET /api/webinars/public/free-weekly/next  ->  { _id, title, date, flyerUrl }   (404 when none is scheduled)
+exports.getNextFreeWeeklyWebinar = async (req, res) => {
+  try {
+    const webinar = await Webinar.findOne({ status: "published", announce: true, date: { $gt: new Date() } })
+      .sort({ date: 1 })
+      .select("title date flyerUrl");
+    if (!webinar) return res.status(404).json({ message: "No upcoming webinar" });
+    res.set("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
+    res.json({ _id: webinar._id, title: webinar.title, date: webinar.date, flyerUrl: webinar.flyerUrl || undefined });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 exports.getPublicWebinar = async (req, res) => {
   const webinar = await Webinar.findOne({ _id: req.params.id, status: "published" })
     .select("title description date fields"); // ✅ assignedTo hata diya
