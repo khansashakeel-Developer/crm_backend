@@ -39,6 +39,15 @@ const batchSchema = new mongoose.Schema(
       enum: ["upcoming", "active", "completed", "cancelled"],
       default: "upcoming",
     },
+    // Website announcements (set by marketing in the CRM). Nothing is announced unless "announce" is ticked.
+    announce: {
+      type: Boolean,
+      default: false, // "Announce on the website" (upcoming-trainings window)
+    },
+    show_in_strip: {
+      type: Boolean,
+      default: false, // "Show in the scrolling strip under the website menu"
+    },
     instructor_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

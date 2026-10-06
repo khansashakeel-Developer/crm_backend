@@ -18,6 +18,8 @@ const WebinarSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String },
   date: { type: Date, required: true },
+  // Flyer shown alone in the website's webinar announcement window (uploaded via POST /api/v1/announcements/flyer).
+  flyerUrl: { type: String },
   status: { type: String, enum: ['draft', 'published', 'closed'], default: 'draft' },
   fields: [FieldSchema],
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
