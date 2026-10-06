@@ -75,7 +75,7 @@ exports.getWebinarRegistrations = async (req, res) => {
 // GET /api/webinars/public/free-weekly/next  ->  { _id, title, date, flyerUrl }   (404 when none is scheduled)
 exports.getNextFreeWeeklyWebinar = async (req, res) => {
   try {
-    const webinar = await Webinar.findOne({ status: "published", date: { $gt: new Date() } })
+    const webinar = await Webinar.findOne({ status: "published", announce: true, date: { $gt: new Date() } })
       .sort({ date: 1 })
       .select("title date flyerUrl");
     if (!webinar) return res.status(404).json({ message: "No upcoming webinar" });
